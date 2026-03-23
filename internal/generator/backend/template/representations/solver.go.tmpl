@@ -414,7 +414,7 @@ func (s *solver) processInstruction(pi constraint.PackedInstruction, scratch *sc
 }
 
 
-// run runs the solver. it return an error if a constraint is not satisfied or if not all wires
+// run runs the solver. it returns an error if a constraint is not satisfied or if not all wires
 // were instantiated.
 func (s *solver) run() error {
 	// minWorkPerCPU is the minimum target number of constraint a task should hold
@@ -638,6 +638,10 @@ func (r *UnsatisfiedConstraintError) Error() string {
 	return fmt.Sprintf("constraint #%d is not satisfied: %s", r.CID, r.Err.Error())
 }
 
+func (r *UnsatisfiedConstraintError) Unwrap() error {
+	return r.Err
+}
+
 
 func (s *solver) wrapErrWithDebugInfo(cID uint32, err error) *UnsatisfiedConstraintError {
 	var debugInfo *string
@@ -653,4 +657,3 @@ type scratch struct {
 	tR1C constraint.R1C
 	tHint constraint.HintMapping
 }
-

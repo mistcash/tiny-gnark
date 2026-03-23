@@ -8,16 +8,16 @@ package gkr
 import (
 	"fmt"
 	"math/bits"
+	"reflect"
 	"slices"
 	"sync"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bw6-761/fr"
 	"github.com/consensys/gnark-crypto/ecc/bw6-761/fr/polynomial"
-	fiatshamir "github.com/consensys/gnark-crypto/fiat-shamir"
 	"github.com/consensys/gnark-crypto/hash"
 	"github.com/consensys/gnark/constraint"
-	"github.com/consensys/gnark/internal/gkr/gkrtypes"
+	"github.com/consensys/gnark/internal/gkr/gkrcore"
 )
 
 func init() {
@@ -33,7 +33,7 @@ type circuitEvaluator struct {
 // BlueprintSolve is a BW6_761-specific blueprint for solving GKR circuit instances.
 type BlueprintSolve struct {
 	// Circuit structure (serialized)
-	Circuit     gkrtypes.SerializableCircuit
+	Circuit     gkrcore.SerializableCircuit
 	NbInstances uint32
 
 	// Not serialized - recreated lazily at solve time
@@ -48,9 +48,17 @@ type BlueprintSolve struct {
 // Ensures BlueprintSolve implements BlueprintStateful
 var _ constraint.BlueprintStateful[constraint.U64] = (*BlueprintSolve)(nil)
 
-func (b *BlueprintSolve) setOutputWires() {
-	b.Circuit.OutputsList() // for side effects
-	b.outputWires = b.Circuit.Outputs()
+// Equal returns true if the serialized fields of two BlueprintSolve are equal.
+// Used for testing serialization round-trips.
+func (b *BlueprintSolve) Equal(other constraint.BlueprintComparable) bool {
+	if other == nil {
+		return false
+	}
+	o, ok := other.(*BlueprintSolve)
+	if !ok {
+		return false
+	}
+	return b.NbInstances == o.NbInstances && reflect.DeepEqual(b.Circuit, o.Circuit) && reflect.DeepEqual(b.assignments, o.assignments)
 }
 
 // Reset implements BlueprintStateful.
@@ -69,7 +77,7 @@ func (b *BlueprintSolve) Reset() {
 		return ce
 	}
 
-	b.setOutputWires()
+	b.outputWires = b.Circuit.Outputs()
 
 	assignments := make(WireAssignment, len(b.Circuit))
 	nbPaddedInstances := ecc.NextPowerOfTwo(uint64(b.NbInstances))
@@ -116,7 +124,7 @@ func (b *BlueprintSolve) Solve(s constraint.Solver[constraint.U64], inst constra
 
 			// Push gate inputs
 			for _, inWI := range w.Inputs {
-				evaluator.pushInput(&b.assignments[inWI][instanceI])
+				evaluator.pushInput(b.assignments[inWI][instanceI])
 			}
 
 			// Evaluate the gate
@@ -151,7 +159,9 @@ func (b *BlueprintSolve) NbConstraints() int {
 
 // NbOutputs implements Blueprint
 func (b *BlueprintSolve) NbOutputs(inst constraint.Instruction) int {
-	b.setOutputWires()
+	if b.outputWires == nil {
+		b.outputWires = b.Circuit.Outputs()
+	}
 	return len(b.outputWires)
 }
 
@@ -193,6 +203,7 @@ func (b *BlueprintSolve) UpdateInstructionTree(inst constraint.Instruction, tree
 type BlueprintProve struct {
 	SolveBlueprintID constraint.BlueprintID
 	SolveBlueprint   *BlueprintSolve `cbor:"-"` // not serialized, set at compile time
+	Schedule         constraint.GkrProvingSchedule
 	HashName         string
 
 	lock sync.Mutex
@@ -200,6 +211,18 @@ type BlueprintProve struct {
 
 // Ensures BlueprintProve implements BlueprintSolvable
 var _ constraint.BlueprintSolvable[constraint.U64] = (*BlueprintProve)(nil)
+
+// Equal returns true if the serialized fields of two BlueprintProve are equal.
+func (b *BlueprintProve) Equal(other constraint.BlueprintComparable) bool {
+	if other == nil {
+		return false
+	}
+	o, ok := other.(*BlueprintProve)
+	if !ok {
+		return false
+	}
+	return b.SolveBlueprintID == o.SolveBlueprintID && b.HashName == o.HashName && reflect.DeepEqual(b.Schedule, o.Schedule)
+}
 
 // Solve implements the BlueprintSolvable interface for proving.
 func (b *BlueprintProve) Solve(s constraint.Solver[constraint.U64], inst constraint.Instruction) error {
@@ -233,9 +256,11 @@ func (b *BlueprintProve) Solve(s constraint.Solver[constraint.U64], inst constra
 		}
 	}
 
+	// Create hasher and write base challenges
+	hsh := hash.NewHash(b.HashName + "_BW6_761")
+
 	// Read initial challenges from instruction calldata (parse dynamically, no metadata)
 	// Format: [0]=totalSize, [1...]=challenge linear expressions
-	insBytes := make([][]byte, 0) // first challenges
 	calldata := inst.Calldata[1:] // skip size prefix
 	for len(calldata) != 0 {
 		val, delta := s.Read(calldata)
@@ -244,17 +269,14 @@ func (b *BlueprintProve) Solve(s constraint.Solver[constraint.U64], inst constra
 		// Copy directly from constraint.U64 to fr.Element (both in Montgomery form)
 		var challenge fr.Element
 		copy(challenge[:], val[:])
-		insBytes = append(insBytes, challenge.Marshal())
+		challengeBytes := challenge.Bytes()
+		hsh.Write(challengeBytes[:])
 	}
 
-	// Create Fiat-Shamir settings
-	hsh := hash.NewHash(b.HashName + "_BW6_761")
-	fsSettings := fiatshamir.WithHash(hsh, insBytes...)
-
 	// Call the BW6_761-specific Prove function (assignments already WireAssignment type)
-	proof, err := Prove(solveBlueprint.Circuit, assignments, fsSettings)
+	proof, err := Prove(solveBlueprint.Circuit, b.Schedule, assignments, hsh)
 	if err != nil {
-		return fmt.Errorf("bw6_761 prove failed: %w", err)
+		return fmt.Errorf("BW6_761 prove failed: %w", err)
 	}
 
 	for i, elem := range proof.flatten() {
@@ -282,7 +304,7 @@ func (b *BlueprintProve) proofSize() int {
 	}
 	nbPaddedInstances := ecc.NextPowerOfTwo(uint64(b.SolveBlueprint.NbInstances))
 	logNbInstances := bits.TrailingZeros64(nbPaddedInstances)
-	return b.SolveBlueprint.Circuit.ProofSize(logNbInstances)
+	return b.SolveBlueprint.Circuit.ProofSize(b.Schedule, logNbInstances)
 }
 
 // NbOutputs implements Blueprint
@@ -334,6 +356,18 @@ type BlueprintGetAssignment struct {
 
 // Ensures BlueprintGetAssignment implements BlueprintSolvable
 var _ constraint.BlueprintSolvable[constraint.U64] = (*BlueprintGetAssignment)(nil)
+
+// Equal returns true if the serialized fields of two BlueprintGetAssignment are equal.
+func (b *BlueprintGetAssignment) Equal(other constraint.BlueprintComparable) bool {
+	if other == nil {
+		return false
+	}
+	o, ok := other.(*BlueprintGetAssignment)
+	if !ok {
+		return false
+	}
+	return b.SolveBlueprintID == o.SolveBlueprintID
+}
 
 // Solve implements the BlueprintSolvable interface for getting assignments.
 func (b *BlueprintGetAssignment) Solve(s constraint.Solver[constraint.U64], inst constraint.Instruction) error {
@@ -399,7 +433,7 @@ func (b *BlueprintGetAssignment) UpdateInstructionTree(inst constraint.Instructi
 }
 
 // NewBlueprints creates and registers all GKR blueprints for BW6_761
-func NewBlueprints(circuit gkrtypes.SerializableCircuit, hashName string, compiler constraint.CustomizableSystem) gkrtypes.Blueprints {
+func NewBlueprints(circuit gkrcore.SerializableCircuit, schedule constraint.GkrProvingSchedule, hashName string, compiler constraint.CustomizableSystem) gkrcore.Blueprints {
 	// Create and register solve blueprint
 	solve := &BlueprintSolve{Circuit: circuit}
 	solveID := compiler.AddBlueprint(solve)
@@ -408,6 +442,7 @@ func NewBlueprints(circuit gkrtypes.SerializableCircuit, hashName string, compil
 	prove := &BlueprintProve{
 		SolveBlueprintID: solveID,
 		SolveBlueprint:   solve,
+		Schedule:         schedule,
 		HashName:         hashName,
 	}
 	proveID := compiler.AddBlueprint(prove)
@@ -418,7 +453,7 @@ func NewBlueprints(circuit gkrtypes.SerializableCircuit, hashName string, compil
 	}
 	getAssignmentID := compiler.AddBlueprint(getAssignment)
 
-	return gkrtypes.Blueprints{
+	return gkrcore.Blueprints{
 		SolveID:         solveID,
 		Solve:           solve,
 		ProveID:         proveID,

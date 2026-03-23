@@ -29,6 +29,7 @@ import (
 	bls12381r1cs "github.com/consensys/gnark/constraint/bls12-381"
 	bn254r1cs "github.com/consensys/gnark/constraint/bn254"
 	bw6761r1cs "github.com/consensys/gnark/constraint/bw6-761"
+	grumpkinr1cs "github.com/consensys/gnark/constraint/grumpkin"
 	koalabearr1cs "github.com/consensys/gnark/constraint/koalabear"
 	"github.com/consensys/gnark/constraint/solver"
 	tinyfieldr1cs "github.com/consensys/gnark/constraint/tinyfield"
@@ -59,7 +60,8 @@ type builder[E constraint.Element] struct {
 	mbuf1 expr.LinearExpression[E]
 	mbuf2 expr.LinearExpression[E]
 
-	genericGate constraint.BlueprintID
+	genericGate      constraint.BlueprintID
+	batchInverseGate constraint.BlueprintID
 }
 
 // initialCapacity has quite some impact on frontend performance, especially on large circuits size
@@ -94,6 +96,10 @@ func newBuilder[E constraint.Element](field *big.Int, config frontend.CompileCon
 		case ecc.BW6_761:
 			bldrT.cs = bw6761r1cs.NewR1CS(config.Capacity)
 		default:
+			if field.Cmp(ecc.GRUMPKIN.ScalarField()) == 0 {
+				bldrT.cs = grumpkinr1cs.NewR1CS(config.Capacity)
+				break
+			}
 			panic("not implemented")
 		}
 	case *builder[constraint.U32]:
@@ -121,6 +127,7 @@ func newBuilder[E constraint.Element](field *big.Int, config frontend.CompileCon
 	bldr.cs.AddPublicVariable("1")
 
 	bldr.genericGate = bldr.cs.AddBlueprint(&constraint.BlueprintGenericR1C{})
+	bldr.batchInverseGate = bldr.cs.AddBlueprint(&constraint.BlueprintBatchInverse[E]{})
 
 	var zero E
 	bldr.eZero = expr.NewLinearExpression(0, zero)

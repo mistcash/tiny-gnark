@@ -1,15 +1,13 @@
-{{define "gkrTestVectors"}}
-
-{{$CheckOutputCorrectness := true}}
+{{ define "gkrTestVectors" }}
 
 func unmarshalProof(printable gkrtesting.PrintableProof) (Proof, error) {
 	proof := make(Proof, len(printable))
 	for i := range printable {
-		finalEvalProof := []{{.ElementType}}(nil)
+		finalEvalProof := []{{ .ElementType }}(nil)
 
 		if printable[i].FinalEvalProof != nil {
 			finalEvalSlice := reflect.ValueOf(printable[i].FinalEvalProof)
-			finalEvalProof = make([]{{.ElementType}}, finalEvalSlice.Len())
+			finalEvalProof = make([]{{ .ElementType }}, finalEvalSlice.Len())
 			for k := range finalEvalProof {
 				if _, err := {{ setElement "finalEvalProof[k]" "finalEvalSlice.Index(k).Interface()" .ElementType}}; err != nil {
 					return nil, err
@@ -32,18 +30,17 @@ func unmarshalProof(printable gkrtesting.PrintableProof) (Proof, error) {
 }
 
 type TestCase struct {
-	Circuit         gkrtypes.SerializableCircuit
+	Circuit         gkrcore.SerializableCircuit
 	Hash            hash.Hash
 	Proof           Proof
 	FullAssignment  WireAssignment
 	InOutAssignment WireAssignment
-	{{if .GenerateTestVectors}}Info gkrtesting.TestCaseInfo // we are generating the test vectors, so we need to keep the circuit instance info to ADD the proof to it and resave it{{end}}
+	Schedule        constraint.GkrProvingSchedule
+	{{ if .GenerateTestVectors }}Info gkrtesting.TestCaseInfo // we are generating the test vectors, so we need to keep the circuit instance info to ADD the proof to it and resave it{{ end }}
 }
 
-var (
-	testCases = make(map[string]*TestCase)
-	cache = gkrtesting.NewCache()
-)
+var testCases = make(map[string]*TestCase)
+
 
 func newTestCase(path string) (*TestCase, error) {
 	path, err := filepath.Abs(path)
@@ -62,7 +59,7 @@ func newTestCase(path string) (*TestCase, error) {
 		return nil, err
 	}
 
-	circuit := gkrtypes.ToSerializable(cache.GetCircuit(filepath.Join(dir, info.Circuit)))
+	circuit, _ := cache.GetCircuit(filepath.Join(dir, info.Circuit))
 	var _hash hash.Hash
 	if _hash, err = hashFromDescription(info.Hash); err != nil {
 		return nil, err
@@ -71,22 +68,34 @@ func newTestCase(path string) (*TestCase, error) {
 	if proof, err = unmarshalProof(info.Proof); err != nil {
 		return nil, err
 	}
+	var schedule constraint.GkrProvingSchedule
+	if schedule, err = info.Schedule.ToProvingSchedule(); err != nil {
+		return nil, err
+	}
+	if schedule == nil {
+		if schedule, err = gkrcore.DefaultProvingSchedule(circuit); err != nil {
+			return nil, err
+		}
+	}
+
+	outputSet := make(map[int]bool, len(circuit))
+	for _, o := range circuit.Outputs() {
+		outputSet[o] = true
+	}
 
 	fullAssignment := make(WireAssignment, len(circuit))
 	inOutAssignment := make(WireAssignment, len(circuit))
 
-	sorted := circuit.TopologicalSort()
-
 	inI, outI := 0, 0
-	for i, w := range sorted {
+	for i := range circuit {
 		var assignmentRaw []interface{}
-		if w.IsInput() {
+		if circuit[i].IsInput() {
 			if inI == len(info.Input) {
 				return nil, fmt.Errorf("fewer input in vector than in circuit")
 			}
 			assignmentRaw = info.Input[inI]
 			inI++
-		} else if w.IsOutput() {
+		} else if outputSet[i] {
 			if outI == len(info.Output) {
 				return nil, fmt.Errorf("fewer output in vector than in circuit")
 			}
@@ -104,10 +113,10 @@ func newTestCase(path string) (*TestCase, error) {
 		}
 	}
 
-	fullAssignment.Complete(utils.References(circuit))
+	fullAssignment.Complete(circuit)
 
-	for i, w := range sorted {
-		if w.IsOutput() {
+	for i := range circuit {
+		if outputSet[i] {
 			if err = sliceEquals(inOutAssignment[i], fullAssignment[i]); err != nil {
 				return nil, fmt.Errorf("assignment mismatch: %v", err)
 			}
@@ -120,6 +129,7 @@ func newTestCase(path string) (*TestCase, error) {
 		Proof:           proof,
 		Hash:            _hash,
 		Circuit:         circuit,
+		Schedule:        schedule,
 		{{ if .GenerateTestVectors }} Info:            info, {{ end }}
 	}
 
@@ -128,7 +138,7 @@ func newTestCase(path string) (*TestCase, error) {
 	return tCase, nil
 }
 
-{{end}}
+{{ end }}
 
 {{- define "setElement element value elementType"}}
 {{- if eq .elementType "fr.Element"}} setElement(&{{.element}}, {{.value}})
