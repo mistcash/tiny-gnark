@@ -94,9 +94,17 @@ func NewField[T FieldParams](native frontend.API) (*Field[T], error) {
 		api:              native,
 		log:              logger.Logger(),
 		constrainedLimbs: make(map[[16]byte]int),
-		checker:          rangecheck.New(native),
 		fParams:          newStaticFieldParams[T](native.Compiler().Field()),
+
+		deferredPolyChecker: &polyRingCheckManager[T]{},
 	}
+
+	// ring checks can add additional deferred checks, so run before other checks
+	native.Compiler().Defer(f.performDeferredRingChecks)
+
+	// rangecheck also adds deferred checks
+	f.checker = rangecheck.New(native)
+
 	if smallfields.IsSmallField(native.Compiler().Field()) {
 		compilelogger.LogOnce(native.Compiler(), zerolog.DebugLevel,
 			"emulated/isSmallField",
