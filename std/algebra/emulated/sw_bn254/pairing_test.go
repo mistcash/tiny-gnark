@@ -643,6 +643,56 @@ func TestPairingMuxes(t *testing.T) {
 	}
 }
 
+type ThreePairCircuit struct {
+	In1G1 G1Affine
+	In2G1 G1Affine
+	In3G1 G1Affine
+	In1G2 G2Affine // fixed
+	In2G2 G2Affine // fixed
+	In3G2 G2Affine // full
+	Res   GTEl
+}
+
+func (c *ThreePairCircuit) Define(api frontend.API) error {
+	pairing, err := NewPairing(api)
+	if err != nil {
+		return fmt.Errorf("new pairing: %w", err)
+	}
+	res, err := pairing.Pair(
+		[]*G1Affine{&c.In1G1, &c.In2G1, &c.In3G1},
+		[]*G2Affine{&c.In1G2, &c.In2G2, &c.In3G2},
+	)
+	if err != nil {
+		return fmt.Errorf("pair: %w", err)
+	}
+	pairing.AssertIsEqual(res, &c.Res)
+	return nil
+}
+
+func TestThreePairTestSolve(t *testing.T) {
+	assert := test.NewAssert(t)
+	p1, q1 := randomG1G2Affines()
+	p2, q2 := randomG1G2Affines()
+	p3, q3 := randomG1G2Affines()
+	res, err := bn254.Pair([]bn254.G1Affine{p1, p2, p3}, []bn254.G2Affine{q1, q2, q3})
+	assert.NoError(err)
+	witness := ThreePairCircuit{
+		In1G1: NewG1Affine(p1),
+		In2G1: NewG1Affine(p2),
+		In3G1: NewG1Affine(p3),
+		In1G2: NewG2AffineFixed(q1),
+		In2G2: NewG2AffineFixed(q2),
+		In3G2: NewG2Affine(q3),
+		Res:   NewGTEl(res),
+	}
+	circuit := ThreePairCircuit{
+		In1G2: NewG2AffineFixedPlaceholder(),
+		In2G2: NewG2AffineFixedPlaceholder(),
+	}
+	err = test.IsSolved(&circuit, &witness, ecc.BN254.ScalarField())
+	assert.NoError(err)
+}
+
 // bench
 func BenchmarkPairing(b *testing.B) {
 	// e(a,2b) * e(-2a,b) == 1
