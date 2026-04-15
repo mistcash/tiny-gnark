@@ -643,6 +643,86 @@ func TestPairingMuxes(t *testing.T) {
 	}
 }
 
+// FixedPairingCheckAndMLFinalExpCircuit combines:
+//   - a 2-pair PairingCheck using fixed (precomputed) G2 points, and
+//   - an AssertMillerLoopAndFinalExpIsOne check where one Miller loop result
+//     is supplied as a witness (computed outside the circuit).
+type FixedPairingCheckAndMLFinalExpCircuit struct {
+	// Set 1: e(In1G1, In1G2) * e(In2G1, In2G2) == 1, fixed G2 points
+	In1G1 G1Affine
+	In2G1 G1Affine
+	In1G2 G2Affine // fixed – precomputed line evaluations
+	In2G2 G2Affine // fixed – precomputed line evaluations
+	// Set 2: MillerLoop(In3G1, In3G2) * Prev must have final-exp == 1,
+	// where Prev = MillerLoop(p3, q3) was computed outside the circuit.
+	In3G1 G1Affine
+	In3G2 G2Affine
+	Prev  GTEl
+}
+
+func (c *FixedPairingCheckAndMLFinalExpCircuit) Define(api frontend.API) error {
+	pairing, err := NewPairing(api)
+	if err != nil {
+		return fmt.Errorf("new pairing: %w", err)
+	}
+	// Step 1: fixed-Q pairing check for set 1.
+	if err = pairing.PairingCheck(
+		[]*G1Affine{&c.In1G1, &c.In2G1},
+		[]*G2Affine{&c.In1G2, &c.In2G2},
+	); err != nil {
+		return fmt.Errorf("pairing check: %w", err)
+	}
+	// Step 2: Miller loop (in-circuit) * outside-computed ML result, then
+	// assert the combined product has final-exponentiation == 1.
+	pairing.AssertMillerLoopAndFinalExpIsOne(&c.In3G1, &c.In3G2, &c.Prev)
+	return nil
+}
+
+func TestFixedPairingCheckAndMLFinalExpTestSolve(t *testing.T) {
+	assert := test.NewAssert(t)
+
+	// Set 1: e(p1, 2·q1) * e(-2·p1, q1) == 1
+	p1, q1 := randomG1G2Affines()
+	var p2 bn254.G1Affine
+	p2.Double(&p1).Neg(&p2)
+	var q2 bn254.G2Affine
+	q2.Set(&q1)
+	q1.Double(&q1)
+
+	// Set 2: e(p3, 2·q3) * e(-2·p3, q3) == 1
+	// (p3,q3) is paired outside the circuit; (p4,q4) goes into the circuit.
+	p3, q3 := randomG1G2Affines()
+	var p4 bn254.G1Affine
+	p4.Double(&p3).Neg(&p4)
+	var q4 bn254.G2Affine
+	q4.Set(&q3)
+	q3.Double(&q3)
+
+	// Compute MillerLoop(p3, q3) outside the circuit.
+	lines3 := bn254.PrecomputeLines(q3)
+	mlres, err := bn254.MillerLoopFixedQ(
+		[]bn254.G1Affine{p3},
+		[][2][len(bn254.LoopCounter)]bn254.LineEvaluationAff{lines3},
+	)
+	assert.NoError(err)
+
+	witness := FixedPairingCheckAndMLFinalExpCircuit{
+		In1G1: NewG1Affine(p1),
+		In2G1: NewG1Affine(p2),
+		In1G2: NewG2AffineFixed(q1),
+		In2G2: NewG2AffineFixed(q2),
+		In3G1: NewG1Affine(p4),
+		In3G2: NewG2Affine(q4),
+		Prev:  NewGTEl(mlres),
+	}
+	circuit := FixedPairingCheckAndMLFinalExpCircuit{
+		In1G2: NewG2AffineFixedPlaceholder(),
+		In2G2: NewG2AffineFixedPlaceholder(),
+	}
+	err = test.IsSolved(&circuit, &witness, ecc.BN254.ScalarField())
+	assert.NoError(err)
+}
+
 type ThreePairCircuit struct {
 	In1G1 G1Affine
 	In2G1 G1Affine
