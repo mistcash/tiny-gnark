@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/internal/compilelogger"
 	"github.com/consensys/gnark/internal/kvstore"
 	"github.com/consensys/gnark/internal/smallfields"
 	"github.com/consensys/gnark/internal/utils"
@@ -103,7 +104,9 @@ func NewField[T FieldParams](native frontend.API) (*Field[T], error) {
 	f.checker = rangecheck.New(native)
 
 	if smallfields.IsSmallField(native.Compiler().Field()) {
-		f.log.Debug().Msg("using small native field, multiplication checks will be performed in extension field")
+		compilelogger.LogOnce(native.Compiler(), zerolog.DebugLevel,
+			"emulated/isSmallField",
+			"using small native field, multiplication checks will be performed in extension field")
 		extapi, err := fieldextension.NewExtension(native)
 		if err != nil {
 			return nil, fmt.Errorf("extension field: %w", err)
@@ -392,10 +395,9 @@ func (f *Field[T]) useSmallFieldOptimization() bool {
 
 		f.smallFieldMode = 2*modBits+batchingMargin < nativeBits-2
 		if f.smallFieldMode {
-			f.log.Debug().
-				Uint("modBits", modBits).
-				Uint("nativeBits", nativeBits).
-				Msg("using small field optimization for emulated multiplication")
+			compilelogger.LogOnce(f.api.Compiler(), zerolog.DebugLevel,
+				"emulated/useSmallFieldOptimization",
+				"using small field optimization for emulated multiplication (modBits = %d, nativeBits = %d)", modBits, nativeBits)
 		}
 	})
 	return f.smallFieldMode
