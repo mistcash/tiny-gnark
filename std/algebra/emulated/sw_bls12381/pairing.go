@@ -23,6 +23,7 @@ type Pairing struct {
 	g1     *G1
 }
 
+type basePoly = emulated.Poly[emulated.BLS12381Fp]
 type baseEl = emulated.Element[BaseField]
 type GTEl = fields_bls12381.E12
 
@@ -160,24 +161,26 @@ func (pr *Pairing) PairingCheck(P []*G1Affine, Q []*G2Affine) error {
 		lines[i] = *Q[i].Lines
 	}
 
-	res, err := pr.millerLoopLines(P, lines, residueWitnessInv, false)
+	res, err := pr.millerLoopLines(P, lines, residueWitnessInv.ToPoly(), false)
 	if err != nil {
 		return fmt.Errorf("miller loop: %w", err)
 	}
-	res = pr.Ext12.Conjugate(res)
 
 	// Check that: MillerLoop(P,Q) * scalingFactor * residueWitnessInv^(p-x₀) == 1
 	// where u=-0xd201000000010000 is the BLS12-381 seed, and residueWitness,
 	// scalingFactor from the hint.
 	// Note that res is already MillerLoop(P,Q) * residueWitnessInv^{-x₀} since
 	// we initialized the Miller loop accumulator with residueWitnessInv.
+	// (The negative-x₀ conjugation of the raw Miller loop cancels with the
+	// conjugation of the residueWitnessInv seeding, so we consume the raw
+	// accumulator directly.)
 	// So we only need to check that:
 	// 		res * scalingFactor * residueWitnessInv^p == 1
-	res = pr.Ext12.Mul(res, &scalingFactor)
+	res.Mul(scalingFactor.ToPoly())
 	t0 := pr.Frobenius(residueWitnessInv)
-	res = pr.Ext12.Mul(res, t0)
+	res.Mul(t0.ToPoly())
 
-	pr.AssertIsEqual(res, pr.Ext12.One())
+	pr.AssertIsEqual(pr.PolyToE12(res.Eval()), pr.Ext12.One())
 	return nil
 }
 
@@ -398,12 +401,26 @@ func (pr *Pairing) MillerLoop(P []*G1Affine, Q []*G2Affine) (*GTEl, error) {
 		}
 		lines[i] = *Q[i].Lines
 	}
-	return pr.millerLoopLines(P, lines, nil, true)
-
+	res, err := pr.millerLoopLines(P, lines, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	// negative x₀: conjugate the raw Miller loop result
+	return pr.Ext12.Conjugate(pr.PolyToE12(res.Eval())), nil
 }
 
-// millerLoopLines computes the multi-Miller loop from points in G1 and precomputed lines in G2
-func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init *GTEl, first bool) (*GTEl, error) {
+// millerLoopLines computes the multi-Miller loop from points in G1 and
+// precomputed lines in G2. The result is accumulated as a polynomial-ring
+// product and returned as a [emulated.PolyRingAccumulator] so that callers can
+// keep folding the final-exponentiation factors into the same deferred check.
+//
+// Note: the returned accumulator holds the *raw* Miller loop value
+// f_{|x₀|,Q}(P); since x₀ is negative the caller is responsible for the final
+// conjugation (see MillerLoop). For the residue-witness based checks the
+// caller's conjugation cancels with this one, so they consume the accumulator
+// directly.
+func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init *basePoly, first bool) (*emulated.PolyRingAccumulator[BaseField], error) {
+	_ = first // kept for signature parity; the accumulator squares an empty (=1) state at no cost
 
 	// check input size match
 	n := len(P)
@@ -426,89 +443,47 @@ func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init 
 	}
 
 	// Compute ∏ᵢ { fᵢ_{x₀,Q}(P) }
-	res := pr.Ext12.One()
+	// targetDeg bounds the per-iteration degree growth before the accumulator
+	// reduces modulo the ring modulus.
+	res := pr.NewPolyRingAccumulator(69)
 
 	if init != nil {
-		res = init
+		res.Mul(init)
 	}
 
-	j := len(loopCounter) - 2
-	if first {
-		// i = j, separately to avoid an E12 Square
-		// (Square(res) = 1² = 1)
-		// Batch lines within each pair using sparse×sparse optimization
-		for k := 0; k < n; k++ {
-			res = pr.Mul02368By02368ThenMul(res,
-				pr.MulByElement(&lines[k][0][j].R1, yInv[k]),
-				pr.MulByElement(&lines[k][0][j].R0, xNegOverY[k]),
-				pr.MulByElement(&lines[k][1][j].R1, yInv[k]),
-				pr.MulByElement(&lines[k][1][j].R0, xNegOverY[k]),
-			)
-		}
-		j--
-	}
-
-	for i := j; i >= 0; i-- {
+	for i := len(loopCounter) - 2; i >= 0; i-- {
 		// mutualize the square among n Miller loops
 		// (∏ᵢfᵢ)²
-		res = pr.Ext12.Square(res)
+		res.Sqr()
 
 		if loopCounter[i] == 0 {
-			// For 0-bit: batch lines 2-by-2 across pairs using sparse×sparse optimization
-			k := 0
-			for ; k+1 < n; k += 2 {
-				// Batch lines[k] and lines[k+1] together
-				res = pr.Mul02368By02368ThenMul(res,
+			// For 0-bit: one line evaluation per point
+			for k := 0; k < n; k++ {
+				res.Mul(pr.ToPoly02368(
 					pr.MulByElement(&lines[k][0][i].R1, yInv[k]),
 					pr.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
-					pr.MulByElement(&lines[k+1][0][i].R1, yInv[k+1]),
-					pr.MulByElement(&lines[k+1][0][i].R0, xNegOverY[k+1]),
-				)
-			}
-			// Handle odd remaining line
-			if k < n {
-				res = pr.MulBy02368(res,
-					pr.MulByElement(&lines[k][0][i].R1, yInv[k]),
-					pr.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
-				)
+				))
 			}
 		} else {
 			if init != nil {
 				// multiply by init when bit=1
-				res = pr.Ext12.Mul(res, init)
+				res.Mul(init)
 			}
-			// For 1-bit: batch the two lines within each pair, then batch pairs 2-by-2
-			k := 0
-			for ; k+1 < n; k += 2 {
-				// First pair: lines[k][0] × lines[k][1]
-				res = pr.Mul02368By02368ThenMul(res,
+			// For 1-bit: two line evaluations per point
+			for k := 0; k < n; k++ {
+				res.Mul(pr.ToPoly02368(
 					pr.MulByElement(&lines[k][0][i].R1, yInv[k]),
 					pr.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
+				))
+				res.Mul(pr.ToPoly02368(
 					pr.MulByElement(&lines[k][1][i].R1, yInv[k]),
 					pr.MulByElement(&lines[k][1][i].R0, xNegOverY[k]),
-				)
-				// Second pair: lines[k+1][0] × lines[k+1][1]
-				res = pr.Mul02368By02368ThenMul(res,
-					pr.MulByElement(&lines[k+1][0][i].R1, yInv[k+1]),
-					pr.MulByElement(&lines[k+1][0][i].R0, xNegOverY[k+1]),
-					pr.MulByElement(&lines[k+1][1][i].R1, yInv[k+1]),
-					pr.MulByElement(&lines[k+1][1][i].R0, xNegOverY[k+1]),
-				)
-			}
-			// Handle odd remaining pair
-			if k < n {
-				res = pr.Mul02368By02368ThenMul(res,
-					pr.MulByElement(&lines[k][0][i].R1, yInv[k]),
-					pr.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
-					pr.MulByElement(&lines[k][1][i].R1, yInv[k]),
-					pr.MulByElement(&lines[k][1][i].R0, xNegOverY[k]),
-				)
+				))
 			}
 		}
+		// reduce the accumulated product modulo the ring modulus
+		res.Eval()
 	}
-
-	// negative x₀
-	res = pr.Ext12.Conjugate(res)
 
 	return res, nil
 }
@@ -841,29 +816,31 @@ func (pr *Pairing) millerLoopAndFinalExpResult(P *G1Affine, Q *G2Affine, previou
 	res, err := pr.millerLoopLines(
 		[]*G1Affine{P},
 		[]lineEvaluations{lines},
-		residueWitnessInv,
+		residueWitnessInv.ToPoly(),
 		false,
 	)
 	if err != nil {
 		return nil
 	}
-	res = pr.Ext12.Conjugate(res)
 
 	// multiply by previous multi-Miller function
-	res = pr.Ext12.Mul(res, previous)
+	res.Mul(previous.ToPoly())
 
 	// Check that: MillerLoop(P,Q) * scalingFactor * residueWitnessInv^(p-x₀) == 1
 	// where u=-0xd201000000010000 is the BLS12-381 seed, and residueWitnessInv,
 	// scalingFactor from the hint.
 	// Note that res is already MillerLoop(P,Q) * residueWitnessInv^{-x₀} since
 	// we initialized the Miller loop accumulator with residueWitnessInv.
+	// (The negative-x₀ conjugation of the raw Miller loop cancels with the
+	// conjugation of the residueWitnessInv seeding, so we consume the raw
+	// accumulator directly.)
 	// So we only need to check that:
 	// 		res * scalingFactor * residueWitnessInv^p == 1
-	res = pr.Ext12.Mul(res, &scalingFactor)
+	res.Mul(scalingFactor.ToPoly())
 	t0 := pr.Frobenius(residueWitnessInv)
-	res = pr.Ext12.Mul(res, t0)
+	res.Mul(t0.ToPoly())
 
-	return res
+	return pr.PolyToE12(res.Eval())
 
 }
 
