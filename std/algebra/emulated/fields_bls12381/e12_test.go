@@ -131,6 +131,36 @@ func TestMulFp12(t *testing.T) {
 
 }
 
+type e12MulPolyRing struct {
+	A, B, C E12
+}
+
+func (circuit *e12MulPolyRing) Define(api frontend.API) error {
+	e := NewExt12(api)
+	expected := e.MulPoly(e.ToPoly(&circuit.A), e.ToPoly(&circuit.B))
+	e.AssertIsEqual(e.FromPoly(expected), &circuit.C)
+	return nil
+}
+
+func TestMulFp12PolyRing(t *testing.T) {
+
+	assert := test.NewAssert(t)
+	// witness values
+	var a, b, c bls12381.E12
+	_, _ = a.SetRandom()
+	_, _ = b.SetRandom()
+	c.Mul(&a, &b)
+
+	witness := e12MulPolyRing{
+		A: FromE12(&a),
+		B: FromE12(&b),
+		C: FromE12(&c),
+	}
+
+	err := test.IsSolved(&e12MulPolyRing{}, &witness, ecc.BN254.ScalarField())
+	assert.NoError(err)
+}
+
 type e12Square struct {
 	A, C E12
 }

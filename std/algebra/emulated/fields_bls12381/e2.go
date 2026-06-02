@@ -8,6 +8,7 @@ import (
 	"github.com/consensys/gnark/std/math/emulated"
 )
 
+type basePoly = emulated.Poly[emulated.BLS12381Fp]
 type curveF = emulated.Field[emulated.BLS12381Fp]
 type baseEl = emulated.Element[emulated.BLS12381Fp]
 

@@ -11,12 +11,14 @@ import (
 
 type E12 struct {
 	A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11 baseEl
+	poly                                             *basePoly
 }
 
 type Ext12 struct {
 	*Ext2
-	api frontend.API
-	fp  *curveF
+	api  frontend.API
+	fp   *curveF
+	ring *emulated.PolyRingGroupChecks[emulated.BLS12381Fp]
 }
 
 func NewExt12(api frontend.API) *Ext12 {
@@ -24,11 +26,81 @@ func NewExt12(api frontend.API) *Ext12 {
 	if err != nil {
 		panic(err)
 	}
+	// 𝔽p¹² is defined as the direct extension 𝔽p[x]/(x¹² - 2x⁶ + 2), since for
+	// BLS12-381 the tower non-residue is ξ = 1+u (u²=-1) and w⁶ = ξ, so
+	// (w⁶-1)² = -1, i.e. w¹² - 2w⁶ + 2 = 0.
+	modPoly := fp.MakePoly(2, 0, 0, 0, 0, 0, -2, 0, 0, 0, 0, 0, 1)
+	modEval := func(xPowers []*baseEl) *baseEl {
+		a0 := fp.MulConst(xPowers[0], big.NewInt(2))
+		a6 := fp.MulConst(xPowers[6], big.NewInt(-2))
+		a12 := xPowers[12]
+		return fp.Add(a0, fp.Add(a6, a12))
+	}
 	return &Ext12{
 		Ext2: NewExt2(api),
 		api:  api,
 		fp:   fp,
+		ring: fp.NewPolyRingCheck(modPoly, modEval),
 	}
+}
+
+// PolyConv implementation for E12
+
+// ToPoly returns the polynomial-ring representation of a, caching it on the
+// element. The coefficients are the direct-extension coordinates A0..A11.
+func (a *E12) ToPoly() *basePoly {
+	if a.poly == nil {
+		a.poly = &basePoly{
+			Coeffs: []*baseEl{
+				&a.A0, &a.A1, &a.A2, &a.A3, &a.A4, &a.A5,
+				&a.A6, &a.A7, &a.A8, &a.A9, &a.A10, &a.A11,
+			},
+		}
+	}
+	return a.poly
+}
+
+func (e Ext12) ToPoly(a *E12) *basePoly {
+	return a.ToPoly()
+}
+
+// PolyToE12 converts a degree < 12 polynomial back into an E12 element.
+func (e Ext12) PolyToE12(p *basePoly) *E12 {
+	if len(p.Coeffs) != 12 {
+		panic("invalid number of coefficients for E12")
+	}
+	return &E12{
+		A0:   *p.Coeffs[0],
+		A1:   *p.Coeffs[1],
+		A2:   *p.Coeffs[2],
+		A3:   *p.Coeffs[3],
+		A4:   *p.Coeffs[4],
+		A5:   *p.Coeffs[5],
+		A6:   *p.Coeffs[6],
+		A7:   *p.Coeffs[7],
+		A8:   *p.Coeffs[8],
+		A9:   *p.Coeffs[9],
+		A10:  *p.Coeffs[10],
+		A11:  *p.Coeffs[11],
+		poly: p,
+	}
+}
+
+// FromPoly is an alias for PolyToE12.
+func (e Ext12) FromPoly(p *basePoly) *E12 {
+	return e.PolyToE12(p)
+}
+
+func (e Ext12) NewPolyRingAccumulator(targetDeg int) *emulated.PolyRingAccumulator[emulated.BLS12381Fp] {
+	return e.fp.NewPolyRingAccumulator(e.ring, targetDeg)
+}
+
+func (e Ext12) MulPoly(inputs ...*basePoly) *basePoly {
+	rem, err := e.fp.MulPolyRings(e.ring, inputs...)
+	if err != nil {
+		panic(err)
+	}
+	return rem
 }
 
 func (e Ext12) Zero() *E12 {
@@ -207,7 +279,8 @@ func (e Ext12) Conjugate(x *E12) *E12 {
 }
 
 func (e Ext12) Mul(x, y *E12) *E12 {
-	return e.mulDirect(x, y)
+	return e.PolyToE12(e.MulPoly(x.ToPoly(), y.ToPoly()))
+	// return e.mulDirect(x, y)
 }
 
 func (e Ext12) mulDirect(a, b *E12) *E12 {
@@ -398,6 +471,30 @@ func (e Ext12) Inverse(x *E12) *E12 {
 
 	return &inv
 
+}
+
+// InversePoly computes the inverse of x in polynomial-ring representation and
+// constrains it with a single poly-ring multiplication check.
+func (e Ext12) InversePoly(xPoly *basePoly) *basePoly {
+	x := xPoly.Coeffs
+	res, err := e.fp.NewHint(inverseE12Hint, 12, x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], x[8], x[9], x[10], x[11])
+	if err != nil {
+		// err is non-nil only for invalid number of inputs
+		panic(err)
+	}
+
+	inv := &basePoly{
+		Coeffs: []*baseEl{
+			res[0], res[1], res[2], res[3], res[4], res[5],
+			res[6], res[7], res[8], res[9], res[10], res[11]},
+	}
+	one := e.One()
+
+	// 1 == inv * x
+	_one := e.MulPoly(xPoly, inv)
+	e.AssertIsEqual(one, e.PolyToE12(_one))
+
+	return inv
 }
 
 func (e Ext12) DivUnchecked(x, y *E12) *E12 {
