@@ -26,6 +26,7 @@ func NewExt12(api frontend.API) *Ext12 {
 	if err != nil {
 		panic(err)
 	}
+	// direct 𝔽p¹² extension: 𝔽p[x]/(x¹² - 18x⁶ + 82)
 	modPoly := fp.MakePoly(82, 0, 0, 0, 0, 0, -18, 0, 0, 0, 0, 0, 1)
 	modEval := func(xPowers []*baseEl) *baseEl {
 		a0 := fp.MulConst(xPowers[0], big.NewInt(82))
