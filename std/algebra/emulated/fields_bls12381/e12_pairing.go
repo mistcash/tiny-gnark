@@ -157,6 +157,33 @@ func (e *Ext12) MulBy02368(a *E12, c0, c1 *E2) *E12 {
 	}
 }
 
+// ToPoly02368 converts to a polynomial of degree 8 an E12 sparse line
+// element b of the form:
+//
+//	b.A0  =  c0.A0 - c0.A1
+//	b.A1  =  0
+//	b.A2  =  c1.A0 - c1.A1
+//	b.A3  =  1
+//	b.A4  =  0
+//	b.A5  =  0
+//	b.A6  =  c0.A1
+//	b.A7  =  0
+//	b.A8  =  c1.A1
+//	b.A9  =  0
+//	b.A10 =  0
+//	b.A11 =  0
+func (e Ext12) ToPoly02368(c0, c1 *E2) *basePoly {
+	b0 := e.fp.Sub(&c0.A0, &c0.A1)
+	b2 := e.fp.Sub(&c1.A0, &c1.A1)
+	b6 := &c0.A1
+	b8 := &c1.A1
+
+	return &basePoly{
+		Coeffs: []*baseEl{
+			b0, nil, b2, e.fp.One(), nil, nil, b6, nil, b8},
+	}
+}
+
 // Mul02368By02368ThenMul computes a · (l0 · l1) where l0 and l1 are sparse lines.
 // First multiplies the two sparse lines together (sparse × sparse = semi-sparse),
 // then multiplies the result by a.
@@ -362,5 +389,29 @@ func (e *Ext12) MulBySemiSparse1_7(a *E12, b0, b2, b3, b4, b5, b6, b8, b9, b10, 
 		A9:  *d9,
 		A10: *d10,
 		A11: *d11,
+	}
+}
+
+// ToPolySemiSparse1_7 converts to a polynomial of degree 11 the semi-sparse
+// E12 element resulting from the product of two sparse lines, whose A1 and A7
+// coordinates are zero. The input coefficients are laid out as:
+//
+//	b[0] -> A0
+//	b[1] -> A2
+//	b[2] -> A3
+//	b[3] -> A4
+//	b[4] -> A5
+//	b[5] -> A6
+//	b[6] -> A8
+//	b[7] -> A9
+//	b[8] -> A10
+//	b[9] -> A11
+//
+// with A1 = A7 = 0.
+func (e Ext12) ToPolySemiSparse1_7(b [10]*baseEl) *basePoly {
+	return &basePoly{
+		Coeffs: []*baseEl{
+			b[0], nil, b[1], b[2], b[3], b[4],
+			b[5], nil, b[6], b[7], b[8], b[9]},
 	}
 }
