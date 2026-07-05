@@ -23,6 +23,8 @@ import (
 	"github.com/consensys/gnark/std/math/bits"
 )
 
+var NbCommitments int
+
 func (builder *builder[E]) Add(i1, i2 frontend.Variable, in ...frontend.Variable) frontend.Variable {
 	// separate the constant part from the variables
 	vars, k := builder.filterConstantSum(append([]frontend.Variable{i1, i2}, in...))
@@ -722,6 +724,14 @@ func (builder *builder[E]) AddPlonkCommitmentOutputs(committed []int, outs []fro
 }
 
 func (builder *builder[E]) Commit(v ...frontend.Variable) (frontend.Variable, error) {
+	nbCommits := builder.GetKeyValue("API Commitments")
+	if nbCommits != nil {
+		NbCommitments = nbCommits.(int) + len(v)
+		// println("API Commitments", builder.GetKeyValue("API Commitments"))
+	} else {
+		NbCommitments = len(v)
+	}
+	builder.SetKeyValue("API Commitments", NbCommitments)
 	if smallfields.IsSmallField(builder.Field()) {
 		return nil, fmt.Errorf("commitment not supported for small field %s", builder.Field())
 	}
