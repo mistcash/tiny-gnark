@@ -67,6 +67,7 @@ type PolyRingGroupChecks[T FieldParams] struct {
 	modEvalFn EvalFnType[T]         // evaluation of mod at the challenge point, set at check time
 	checks    []polyRingMulCheck[T] // individual operations to check
 	qAcc      *Poly[T]              // random linear combination of quotients ∑_i z^i * q_i
+	toCommit  []frontend.Variable   // additional variable which should be committed to.
 }
 
 // polyRingMulCheck is an individual deferred check.
@@ -87,6 +88,17 @@ func (f *Field[T]) NewPolyRingCheck(mod *Poly[T], modEvalFn EvalFnType[T]) *Poly
 	f.deferredPolyChecks = append(f.deferredPolyChecks, groupCheck)
 
 	return groupCheck
+}
+
+// Add additional variables to commit to for obtaining schwartz zippel lemma challenge.
+// This should be used to commit to hinted values where the check that asserts the correctness of the hint relies
+// on the polynomial identity testing itself.
+// for example, for hinted inverse of x, if the hint assertion happens via ring group operation itself,
+// x * x_inv = 1 + q * mod, then hinted value x_inv needs to be committed to
+func (group *PolyRingGroupChecks[T]) ToCommit(elements ...*Element[T]) {
+	for _, e := range elements {
+		group.toCommit = append(group.toCommit, e.Limbs...)
+	}
 }
 
 // MulPolyRings computes a polynomial product check in a polynomial ring,
@@ -399,6 +411,10 @@ func (f *Field[T]) performDeferredRingChecks(api frontend.API) error {
 	// prepare all remainder coefficients to commit to from each group
 	var remainderCoeffCommits []frontend.Variable
 	for _, group := range f.deferredPolyChecks {
+
+		// additional variables to commit to for obtaining schwartz zippel lemma challenge.
+		remainderCoeffCommits = append(remainderCoeffCommits, group.toCommit...)
+
 		for _, check := range group.checks {
 			for _, rCoeff := range check.r.Coeffs {
 				remainderCoeffCommits = append(remainderCoeffCommits, rCoeff.Limbs...)
