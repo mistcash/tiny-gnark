@@ -448,6 +448,7 @@ func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init 
 	res := pr.NewPolyRingAccumulator(69)
 
 	if init != nil {
+		pr.PolyRingChecker().ToCommit(init.Coeffs...)
 		res.Mul(init)
 	}
 
