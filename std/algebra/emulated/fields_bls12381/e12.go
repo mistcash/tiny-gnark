@@ -89,6 +89,10 @@ func (e Ext12) FromPoly(p *basePoly) *E12 {
 	return e.PolyToE12(p)
 }
 
+func (e Ext12) PolyRingChecker() *emulated.PolyRingGroupChecks[emulated.BLS12381Fp] {
+	return e.ring
+}
+
 func (e Ext12) NewPolyRingAccumulator(targetDeg int) *emulated.PolyRingAccumulator[emulated.BLS12381Fp] {
 	return e.fp.NewPolyRingAccumulator(e.ring, targetDeg)
 }
@@ -277,7 +281,11 @@ func (e Ext12) Conjugate(x *E12) *E12 {
 }
 
 func (e Ext12) Mul(x, y *E12) *E12 {
-	return e.PolyToE12(e.MulPoly(x.ToPoly(), y.ToPoly()))
+	xPoly := x.ToPoly()
+	yPoly := y.ToPoly()
+	e.ring.ToCommit(xPoly.Coeffs...)
+	e.ring.ToCommit(yPoly.Coeffs...)
+	return e.PolyToE12(e.MulPoly(xPoly, yPoly))
 	// return e.mulDirect(x, y)
 }
 
