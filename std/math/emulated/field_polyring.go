@@ -97,7 +97,9 @@ func (f *Field[T]) NewPolyRingCheck(mod *Poly[T], modEvalFn EvalFnType[T]) *Poly
 // x * x_inv = 1 + q * mod, then hinted value x_inv needs to be committed to
 func (group *PolyRingGroupChecks[T]) ToCommit(elements ...*Element[T]) {
 	for _, e := range elements {
-		group.toCommit = append(group.toCommit, e.Limbs...)
+		if e != nil {
+			group.toCommit = append(group.toCommit, e.Limbs...)
+		}
 	}
 }
 
