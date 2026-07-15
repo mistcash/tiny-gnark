@@ -612,8 +612,7 @@ func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init,
 				res.Mul(pr.ToPoly01379(
 					pr.Ext2.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][0][i].R1, yInv[k]),
-				))
-				res.Mul(pr.ToPoly01379(
+				)).Mul(pr.ToPoly01379(
 					pr.Ext2.MulByElement(&lines[k][1][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][1][i].R1, yInv[k]),
 				))
@@ -629,8 +628,7 @@ func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init,
 				res.Mul(pr.ToPoly01379(
 					pr.Ext2.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][0][i].R1, yInv[k]),
-				))
-				res.Mul(pr.ToPoly01379(
+				)).Mul(pr.ToPoly01379(
 					pr.Ext2.MulByElement(&lines[k][1][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][1][i].R1, yInv[k]),
 				))
@@ -657,8 +655,7 @@ func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init,
 				pr.Ext2.MulByElement(&lines[k][0][65].R0, xNegOverY[k]),
 				pr.Ext2.MulByElement(&lines[k][0][65].R1, yInv[k]),
 			),
-		)
-		res.Mul(
+		).Mul(
 			pr.ToPoly01379(
 				pr.Ext2.MulByElement(&lines[k][1][65].R0, xNegOverY[k]),
 				pr.Ext2.MulByElement(&lines[k][1][65].R1, yInv[k]),
