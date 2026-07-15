@@ -834,23 +834,25 @@ func (f *Field[T]) NewPolyRingAccumulator(checker *PolyRingGroupChecks[T], targe
 // Mul adds a new polynomial to the accumulator, ∏_i state_i * poly
 // if targetDeg is set and the accumulated degree would exceed it, Eval
 // is called first to reduce the state before enqueuing
-func (acc *PolyRingAccumulator[T]) Mul(poly *Poly[T]) {
+func (acc *PolyRingAccumulator[T]) Mul(poly *Poly[T]) *PolyRingAccumulator[T] {
 	if acc.targetDeg != 0 && acc.currentDeg+len(poly.Coeffs)-1 > acc.targetDeg {
 		acc.Eval()
 	}
 	acc.currentDeg += len(poly.Coeffs) - 1
 	acc.state = append(acc.state, poly)
+	return acc
 }
 
 // Sqr squares the current accumulation, i.e. ∏_i (state_i * state_i),
 // doubling the degree; if targetDeg is set and the accumulated degree
 // would exceed it, Eval is called to reduce the state before enqueuing
-func (acc *PolyRingAccumulator[T]) Sqr() {
+func (acc *PolyRingAccumulator[T]) Sqr() *PolyRingAccumulator[T] {
 	if acc.targetDeg != 0 && acc.currentDeg+acc.currentDeg > acc.targetDeg {
 		acc.Eval()
 	}
 	acc.currentDeg += acc.currentDeg // degree doubles
 	acc.state = append(acc.state, acc.state...)
+	return acc
 }
 
 // Eval multiplies all queued factors via MulPolyRings, collapses the state

@@ -475,8 +475,7 @@ func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init 
 				res.Mul(pr.ToPoly02368(
 					pr.MulByElement(&lines[k][0][i].R1, yInv[k]),
 					pr.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
-				))
-				res.Mul(pr.ToPoly02368(
+				)).Mul(pr.ToPoly02368(
 					pr.MulByElement(&lines[k][1][i].R1, yInv[k]),
 					pr.MulByElement(&lines[k][1][i].R0, xNegOverY[k]),
 				))
