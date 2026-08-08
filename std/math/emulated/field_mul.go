@@ -74,6 +74,20 @@ type deferredChecker interface {
 	cleanEvaluations()
 }
 
+// rlcDeferredChecker is a deferred checker whose quotient and carry
+// polynomials can be aggregated after receiving a verifier challenge. The
+// first commitment binds the statement inputs and remainders. The prover then
+// provides random linear combinations of the quotient and carry polynomials,
+// which are bound by a second commitment before the polynomial identity is
+// evaluated.
+type rlcDeferredChecker[T FieldParams] interface {
+	deferredChecker
+	rlcToCommit() []frontend.Variable
+	rlcQuotient() (k *Element[T], kNeg frontend.Variable)
+	rlcCarry() *Element[T]
+	rlcLHS(at []frontend.Variable, api frontend.API) frontend.Variable
+}
+
 // mulCheck represents a single multiplication check. Instead of doing a
 // multiplication exactly where called, we compute the result using hint and
 // return it. Additionally, we store the correctness check for later checking
@@ -141,6 +155,35 @@ func (mc *mulCheck[T]) toCommit() []frontend.Variable {
 		toCommit = append(toCommit, mc.p.Limbs...)
 	}
 	return toCommit
+}
+
+// rlcToCommit returns the statement values which must be bound before deriving
+// the random linear-combination challenge. The quotient and carry are prover
+// responses to that challenge and are committed in the second round only after
+// aggregation.
+func (mc *mulCheck[T]) rlcToCommit() []frontend.Variable {
+	nbToCommit := len(mc.a.Limbs) + len(mc.b.Limbs) + len(mc.r.Limbs)
+	toCommit := make([]frontend.Variable, 0, nbToCommit)
+	toCommit = append(toCommit, mc.a.Limbs...)
+	toCommit = append(toCommit, mc.b.Limbs...)
+	toCommit = append(toCommit, mc.r.Limbs...)
+	return toCommit
+}
+
+func (mc *mulCheck[T]) rlcQuotient() (*Element[T], frontend.Variable) {
+	return mc.k, 0
+}
+
+func (mc *mulCheck[T]) rlcCarry() *Element[T] {
+	return mc.c
+}
+
+// rlcLHS evaluates a(X)b(X)-r(X) at the polynomial-identity challenge.
+func (mc *mulCheck[T]) rlcLHS(at []frontend.Variable, api frontend.API) frontend.Variable {
+	mc.r = mc.f.evalWithChallenge(mc.r, at)
+	mc.a = mc.f.evalWithChallenge(mc.a, at)
+	mc.b = mc.f.evalWithChallenge(mc.b, at)
+	return api.Sub(api.Mul(mc.a.evaluation, mc.b.evaluation), mc.r.evaluation)
 }
 
 func (mc *mulCheck[T]) maxLen() int {
@@ -388,101 +431,288 @@ func (f *Field[T]) performDeferredChecks(api frontend.API) error {
 		return nil
 	}
 
-	// we construct a list of elements we want to commit to. Even though we have
-	// committed when doing range checks, do it again here explicitly for safety.
-	// TODO: committing is actually expensive in PLONK. We create a constraint
-	// for every variable we commit to (to set the selector polynomial). So, it
-	// is actually better not to commit again. However, if we would be to use
-	// multi-commit and range checks are in different commitment, then we have
-	// problem.
-	var toCommit []frontend.Variable
-	for i := range f.deferredChecks {
-		toCommit = append(toCommit, f.deferredChecks[i].toCommit()...)
+	var rlcChecks []rlcDeferredChecker[T]
+	var legacyChecks []deferredChecker
+	for _, check := range f.deferredChecks {
+		if f.extensionApi == nil {
+			switch typed := check.(type) {
+			case *mulCheck[T]:
+				if typed.p == nil {
+					rlcChecks = append(rlcChecks, typed)
+					continue
+				}
+			case *mvCheck[T]:
+				rlcChecks = append(rlcChecks, typed)
+				continue
+			}
+		}
+		legacyChecks = append(legacyChecks, check)
 	}
+
+	if len(rlcChecks) > 0 {
+		f.scheduleRLCDeferredChecks(api, rlcChecks)
+	}
+	if len(legacyChecks) > 0 {
+		f.scheduleLegacyDeferredChecks(api, legacyChecks)
+	}
+	return nil
+}
+
+// scheduleRLCDeferredChecks obtains the batching challenge through
+// multicommit, allowing this first round to coalesce with commitments requested
+// by other gadgets. Quotient and carry accumulators are produced only after
+// this challenge is known and are bound by a second commitment.
+func (f *Field[T]) scheduleRLCDeferredChecks(api frontend.API, checks []rlcDeferredChecker[T]) {
+	var toCommit []frontend.Variable
+	for _, check := range checks {
+		toCommit = append(toCommit, check.rlcToCommit()...)
+	}
+	multicommit.WithCommitment(api, func(api frontend.API, z frontend.Variable) error {
+		kAcc, cAcc, err := f.callDeferredChecksRLCHint(checks, z)
+		if err != nil {
+			return fmt.Errorf("deferred checks RLC hint: %w", err)
+		}
+
+		committer, ok := api.(frontend.Committer)
+		if !ok {
+			panic("compiler doesn't implement frontend.Committer")
+		}
+		accumulatorsToCommit := make([]frontend.Variable, 0, 1+len(kAcc.Limbs)+len(cAcc.Limbs))
+		accumulatorsToCommit = append(accumulatorsToCommit, z)
+		accumulatorsToCommit = append(accumulatorsToCommit, kAcc.Limbs...)
+		accumulatorsToCommit = append(accumulatorsToCommit, cAcc.Limbs...)
+		x, err := committer.Commit(accumulatorsToCommit...)
+		if err != nil {
+			return fmt.Errorf("deferred checks accumulator commit: %w", err)
+		}
+
+		coefsLen := int(f.fParams.NbLimbs())
+		coefsLen = max(coefsLen, len(kAcc.Limbs), len(cAcc.Limbs))
+		for _, check := range checks {
+			coefsLen = max(coefsLen, check.maxLen())
+		}
+		xPowers := make([]frontend.Variable, coefsLen)
+		xPowers[0] = x
+		for i := 1; i < len(xPowers); i++ {
+			xPowers[i] = api.Mul(xPowers[i-1], x)
+		}
+
+		lhs := make([]frontend.Variable, len(checks))
+		for i, check := range checks {
+			lhs[i] = check.rlcLHS(xPowers, api)
+		}
+		lhsAcc := lhs[len(lhs)-1]
+		for i := len(lhs) - 2; i >= 0; i-- {
+			lhsAcc = api.MulAcc(lhs[i], z, lhsAcc)
+		}
+
+		pval := f.evalWithChallenge(f.Modulus(), xPowers)
+		kAcc = f.evalWithChallenge(kAcc, xPowers)
+		cAcc = f.evalWithChallenge(cAcc, xPowers)
+		coef := new(big.Int).Lsh(big.NewInt(1), f.fParams.BitsPerLimb())
+		ccoef := api.Sub(coef, x)
+		rhs := api.Add(
+			api.Mul(kAcc.evaluation, pval.evaluation),
+			api.Mul(cAcc.evaluation, ccoef),
+		)
+		api.AssertIsEqual(lhsAcc, rhs)
+
+		for _, check := range checks {
+			check.cleanEvaluations()
+		}
+		pval.evaluation = 0
+		pval.isEvaluated = false
+		return nil
+	}, toCommit...)
+}
+
+// scheduleLegacyDeferredChecks preserves the existing verifier for custom
+// moduli, extension-field checks, and specialised small-field checkers.
+func (f *Field[T]) scheduleLegacyDeferredChecks(api frontend.API, checks []deferredChecker) {
+	var toCommit []frontend.Variable
+	for _, check := range checks {
+		toCommit = append(toCommit, check.toCommit()...)
+	}
+
 	if f.extensionApi == nil {
-		// we give all the inputs as inputs to obtain random verifier challenge.
 		multicommit.WithCommitment(api, func(api frontend.API, commitment frontend.Variable) error {
-			// for efficiency, we compute all powers of the challenge as slice at.
 			coefsLen := int(f.fParams.NbLimbs())
-			for i := range f.deferredChecks {
-				coefsLen = max(coefsLen, f.deferredChecks[i].maxLen())
+			for _, check := range checks {
+				coefsLen = max(coefsLen, check.maxLen())
 			}
 			at := make([]frontend.Variable, coefsLen)
 			at[0] = commitment
 			for i := 1; i < len(at); i++ {
 				at[i] = api.Mul(at[i-1], commitment)
 			}
-			// evaluate all r, k, c
-			for i := range f.deferredChecks {
-				f.deferredChecks[i].evalRound1(at)
+			for _, check := range checks {
+				check.evalRound1(at)
 			}
-			// assuming r is input to some other multiplication, then is already evaluated
-			for i := range f.deferredChecks {
-				f.deferredChecks[i].evalRound2(at)
+			for _, check := range checks {
+				check.evalRound2(at)
 			}
-			// evaluate p(X) at challenge
 			pval := f.evalWithChallenge(f.Modulus(), at)
-			// compute (2^t-X) at challenge
-			coef := big.NewInt(1)
-			coef.Lsh(coef, f.fParams.BitsPerLimb())
+			coef := new(big.Int).Lsh(big.NewInt(1), f.fParams.BitsPerLimb())
 			ccoef := api.Sub(coef, commitment)
-			// verify all mulchecks
-			for i := range f.deferredChecks {
-				f.deferredChecks[i].check(api, pval.evaluation, ccoef)
+			for _, check := range checks {
+				check.check(api, pval.evaluation, ccoef)
 			}
-			// clean cached evaluation. Helps in case we compile the same circuit
-			// multiple times.
-			for i := range f.deferredChecks {
-				f.deferredChecks[i].cleanEvaluations()
+			for _, check := range checks {
+				check.cleanEvaluations()
 			}
 			return nil
 		}, toCommit...)
-	} else {
-		// this is the same as above, but we have challenges in the extension
-		// field. The commitment argument below is actually extension field
-		// element, but we give it as []frontend.Variable for interface
-		// compatibility.
-		multicommit.WithWideCommitment(api, func(api frontend.API, commitment []frontend.Variable) error {
-			// for efficiency, we compute all powers of the challenge as slice at.
-			coefsLen := int(f.fParams.NbLimbs())
-			for i := range f.deferredChecks {
-				coefsLen = max(coefsLen, f.deferredChecks[i].maxLen())
+		return
+	}
+
+	multicommit.WithWideCommitment(api, func(api frontend.API, commitment []frontend.Variable) error {
+		coefsLen := int(f.fParams.NbLimbs())
+		for _, check := range checks {
+			coefsLen = max(coefsLen, check.maxLen())
+		}
+		at := make([]fieldextension.Element, coefsLen)
+		at[0] = commitment
+		for i := 1; i < len(at); i++ {
+			at[i] = f.extensionApi.Mul(at[i-1], commitment)
+		}
+		atv := make([]frontend.Variable, len(at))
+		for i := range at {
+			atv[i] = at[i]
+		}
+		for _, check := range checks {
+			check.evalRound1(atv)
+		}
+		for _, check := range checks {
+			check.evalRound2(atv)
+		}
+		pval := f.evalWithChallenge(f.Modulus(), atv)
+		coef := new(big.Int).Lsh(big.NewInt(1), f.fParams.BitsPerLimb())
+		coefext := f.extensionApi.AsExtensionVariable(coef)
+		ccoef := f.extensionApi.Sub(coefext, commitment)
+		for _, check := range checks {
+			check.check(api, pval.evaluation, ccoef)
+		}
+		for _, check := range checks {
+			check.cleanEvaluations()
+		}
+		return nil
+	}, f.extensionApi.Degree(), toCommit...)
+}
+
+// callDeferredChecksRLCHint computes coefficient-wise random linear
+// combinations of quotient and carry polynomials:
+//
+//	K(X) = Σ z^i s_i k_i(X)
+//	C(X) = Σ z^i c_i(X),
+//
+// where s_i is -1 for a negative mvCheck quotient and 1 otherwise. The
+// resulting coefficients are native-field values and intentionally are not
+// range checked: they are prover messages bound by the second commitment and
+// used only in the final polynomial identity.
+func (f *Field[T]) callDeferredChecksRLCHint(checks []rlcDeferredChecker[T], z frontend.Variable) (kAcc, cAcc *Element[T], err error) {
+	if len(checks) == 0 {
+		return nil, nil, errors.New("no deferred checks to aggregate")
+	}
+
+	maxKLen, maxCLen := 0, 0
+	nbHintInputs := 4
+	for _, check := range checks {
+		k, _ := check.rlcQuotient()
+		c := check.rlcCarry()
+		maxKLen = max(maxKLen, len(k.Limbs))
+		maxCLen = max(maxCLen, len(c.Limbs))
+		nbHintInputs += 3 + len(k.Limbs) + len(c.Limbs)
+	}
+
+	hintInputs := make([]frontend.Variable, 0, nbHintInputs)
+	hintInputs = append(hintInputs, len(checks), maxKLen, maxCLen, z)
+	for _, check := range checks {
+		k, kNeg := check.rlcQuotient()
+		c := check.rlcCarry()
+		hintInputs = append(hintInputs, kNeg, len(k.Limbs))
+		hintInputs = append(hintInputs, k.Limbs...)
+		hintInputs = append(hintInputs, len(c.Limbs))
+		hintInputs = append(hintInputs, c.Limbs...)
+	}
+
+	ret, err := f.api.NewHint(deferredChecksRLCHint, maxKLen+maxCLen, hintInputs...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("call hint: %w", err)
+	}
+	kAcc = f.newInternalElement(ret[:maxKLen], 0)
+	cAcc = f.newInternalElement(ret[maxKLen:], 0)
+	return kAcc, cAcc, nil
+}
+
+func deferredChecksRLCHint(mod *big.Int, inputs, outputs []*big.Int) error {
+	if len(inputs) < 4 {
+		return errors.New("not enough inputs")
+	}
+	nbChecks := int(inputs[0].Int64())
+	maxKLen := int(inputs[1].Int64())
+	maxCLen := int(inputs[2].Int64())
+	if nbChecks < 1 || maxKLen < 0 || maxCLen < 0 {
+		return errors.New("invalid RLC metadata")
+	}
+	if len(outputs) != maxKLen+maxCLen {
+		return errors.New("output length mismatch")
+	}
+
+	for _, output := range outputs {
+		output.SetInt64(0)
+	}
+	kAcc := outputs[:maxKLen]
+	cAcc := outputs[maxKLen:]
+	z := new(big.Int).Mod(new(big.Int).Set(inputs[3]), mod)
+	zPow := new(big.Int).SetInt64(1)
+	term := new(big.Int)
+	ptr := 4
+
+	for i := 0; i < nbChecks; i++ {
+		if ptr+2 > len(inputs) {
+			return errors.New("truncated quotient metadata")
+		}
+		kNeg := inputs[ptr]
+		ptr++
+		if kNeg.Sign() != 0 && kNeg.Cmp(one) != 0 {
+			return fmt.Errorf("quotient sign %d is not boolean", i)
+		}
+		kLen := int(inputs[ptr].Int64())
+		ptr++
+		if kLen < 0 || kLen > maxKLen || ptr+kLen > len(inputs) {
+			return fmt.Errorf("invalid quotient length for check %d", i)
+		}
+		for j := 0; j < kLen; j++ {
+			term.Mul(zPow, inputs[ptr+j])
+			if kNeg.Sign() == 0 {
+				kAcc[j].Add(kAcc[j], term)
+			} else {
+				kAcc[j].Sub(kAcc[j], term)
 			}
-			at := make([]fieldextension.Element, coefsLen)
-			at[0] = commitment
-			for i := 1; i < len(at); i++ {
-				at[i] = f.extensionApi.Mul(at[i-1], commitment)
-			}
-			atv := make([]frontend.Variable, len(at))
-			for i := range at {
-				atv[i] = at[i]
-			}
-			// evaluate all r, k, c
-			for i := range f.deferredChecks {
-				f.deferredChecks[i].evalRound1(atv)
-			}
-			// assuming r is input to some other multiplication, then is already evaluated
-			for i := range f.deferredChecks {
-				f.deferredChecks[i].evalRound2(atv)
-			}
-			// evaluate p(X) at challenge
-			pval := f.evalWithChallenge(f.Modulus(), atv)
-			// compute (2^t-X) at challenge
-			coef := big.NewInt(1)
-			coef.Lsh(coef, f.fParams.BitsPerLimb())
-			coefext := f.extensionApi.AsExtensionVariable(coef)
-			ccoef := f.extensionApi.Sub(coefext, commitment)
-			// verify all mulchecks
-			for i := range f.deferredChecks {
-				f.deferredChecks[i].check(api, pval.evaluation, ccoef)
-			}
-			// clean cached evaluation. Helps in case we compile the same circuit
-			// multiple times.
-			for i := range f.deferredChecks {
-				f.deferredChecks[i].cleanEvaluations()
-			}
-			return nil
-		}, f.extensionApi.Degree(), toCommit...)
+			kAcc[j].Mod(kAcc[j], mod)
+		}
+		ptr += kLen
+
+		if ptr >= len(inputs) {
+			return errors.New("truncated carry metadata")
+		}
+		cLen := int(inputs[ptr].Int64())
+		ptr++
+		if cLen < 0 || cLen > maxCLen || ptr+cLen > len(inputs) {
+			return fmt.Errorf("invalid carry length for check %d", i)
+		}
+		for j := 0; j < cLen; j++ {
+			term.Mul(zPow, inputs[ptr+j])
+			cAcc[j].Add(cAcc[j], term)
+			cAcc[j].Mod(cAcc[j], mod)
+		}
+		ptr += cLen
+
+		zPow.Mul(zPow, z)
+		zPow.Mod(zPow, mod)
+	}
+	if ptr != len(inputs) {
+		return errors.New("inputs not exhausted")
 	}
 	return nil
 }
@@ -1106,6 +1336,47 @@ func (mc *mvCheck[T]) toCommit() []frontend.Variable {
 		toCommit = append(toCommit, mc.vals[j].Limbs...)
 	}
 	return toCommit
+}
+
+func (mc *mvCheck[T]) rlcToCommit() []frontend.Variable {
+	nbToCommit := len(mc.r.Limbs)
+	for j := range mc.vals {
+		nbToCommit += len(mc.vals[j].Limbs)
+	}
+	toCommit := make([]frontend.Variable, 0, nbToCommit)
+	toCommit = append(toCommit, mc.r.Limbs...)
+	for j := range mc.vals {
+		toCommit = append(toCommit, mc.vals[j].Limbs...)
+	}
+	return toCommit
+}
+
+func (mc *mvCheck[T]) rlcQuotient() (*Element[T], frontend.Variable) {
+	return mc.k, mc.kNeg
+}
+
+func (mc *mvCheck[T]) rlcCarry() *Element[T] {
+	return mc.c
+}
+
+// rlcLHS evaluates mv(vals)(X)-r(X) at the polynomial-identity challenge.
+func (mc *mvCheck[T]) rlcLHS(at []frontend.Variable, api frontend.API) frontend.Variable {
+	mc.r = mc.f.evalWithChallenge(mc.r, at)
+	for i := range mc.vals {
+		mc.vals[i] = mc.f.evalWithChallenge(mc.vals[i], at)
+	}
+
+	ls := frontend.Variable(0)
+	for i, term := range mc.mv.Terms {
+		termProd := frontend.Variable(mc.mv.Coefficients[i])
+		for j, pow := range term {
+			for range pow {
+				termProd = api.Mul(termProd, mc.vals[j].evaluation)
+			}
+		}
+		ls = api.Add(ls, termProd)
+	}
+	return api.Sub(ls, mc.r.evaluation)
 }
 
 func (mc *mvCheck[T]) maxLen() int {
