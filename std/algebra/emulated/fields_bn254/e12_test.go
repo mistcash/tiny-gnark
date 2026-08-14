@@ -455,7 +455,20 @@ func (circuit *e12Mul01379By01379) Define(api frontend.API) error {
 	e := NewExt12(api)
 	res := e.Mul01379By01379(&circuit.A, &circuit.B, &circuit.C, &circuit.D)
 	e.AssertIsEqual(
-		&E12{*res[0], *res[1], *res[2], *res[3], *res[4], *e.fp.Zero(), *res[5], *res[6], *res[7], *res[8], *res[9], *e.fp.Zero()},
+		&E12{
+			A0:  *res[0],
+			A1:  *res[1],
+			A2:  *res[2],
+			A3:  *res[3],
+			A4:  *res[4],
+			A5:  *e.fp.Zero(),
+			A6:  *res[5],
+			A7:  *res[6],
+			A8:  *res[7],
+			A9:  *res[8],
+			A10: *res[9],
+			A11: *e.fp.Zero(),
+		},
 		&circuit.W,
 	)
 	return nil
