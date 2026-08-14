@@ -553,6 +553,7 @@ func (f *Field[T]) callMulHint(a, b *Element[T], isMulMod bool, customMod *Eleme
 	if isMulMod {
 		rem = f.packLimbs(ret[nbQuoLimbs:nbQuoLimbs+nbRemLimbs], true)
 	} else {
+		f.api.AssertIsEqual(ret[nbQuoLimbs], 0)
 		rem = &Element[T]{}
 	}
 	// pack the carries into element. Used in the deferred multiplication check

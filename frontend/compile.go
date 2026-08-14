@@ -9,7 +9,7 @@ import (
 
 	"github.com/consensys/gnark"
 	"github.com/consensys/gnark/constraint"
-	"github.com/consensys/gnark/debug"
+	// "github.com/consensys/gnark/debug"
 	"github.com/consensys/gnark/frontend/schema"
 	"github.com/consensys/gnark/internal/circuitdefer"
 	"github.com/consensys/gnark/internal/smallfields"
@@ -147,9 +147,9 @@ func parseCircuit[E constraint.Element](builder Builder[E], circuit Circuit) (er
 
 	// recover from panics to print user-friendlier messages
 	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%v\n%s", r, debug.Stack())
-		}
+		// if r := recover(); r != nil {
+		// 	err = fmt.Errorf("%v\n%s", r, debug.Stack())
+		// }
 	}()
 
 	// call Define() to fill in the Constraints

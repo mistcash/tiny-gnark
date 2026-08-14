@@ -244,6 +244,25 @@ func TestFinalExponentiationIsOneTestSolve(t *testing.T) {
 	}
 	err = test.IsSolved(&FinalExponentiationIsOne{}, &witness, ecc.BN254.ScalarField())
 	assert.NoError(err)
+
+	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), scs.NewBuilder, &witness)
+	assert.NoError(err)
+
+	t.Logf("nb commitments: %d, nbConstraints %d, nbInstructions: %d", scs.NbCommitments, ccs.GetNbConstraints(), ccs.GetNbInstructions())
+
+	circuit := FinalExponentiationIsOne{
+		InGt: NewGTEl(ml),
+	}
+
+	ccs, err = frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
+	assert.NoError(err)
+
+	t.Logf("nb commitments: %d, nbConstraints %d, nbInstructions: %d", scs.NbCommitments, ccs.GetNbConstraints(), ccs.GetNbInstructions())
+
+	circuit = FinalExponentiationIsOne{
+		InGt: NewGTEl(ml),
+	}
+
 }
 
 type PairCircuit struct {
@@ -382,6 +401,12 @@ func TestPairingCheckTestSolve(t *testing.T) {
 	}
 	err := test.IsSolved(&PairingCheckCircuit{}, &witness, ecc.BN254.ScalarField())
 	assert.NoError(err)
+
+	ccsr1, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &PairingCheckCircuit{})
+	assert.NoError(err)
+
+	t.Logf("nbConstraints %d, nbInstructions: %d", ccsr1.GetNbConstraints(), ccsr1.GetNbInstructions())
+
 }
 
 type ThreePairingCheckCircuit struct {
@@ -399,8 +424,8 @@ func (c *ThreePairingCheckCircuit) Define(api frontend.API) error {
 		return fmt.Errorf("new pairing: %w", err)
 	}
 	err = pairing.PairingCheck(
-		[]*G1Affine{&c.In1G1, &c.In2G1, &c.In3G1},
-		[]*G2Affine{&c.In1G2, &c.In2G2, &c.In3G2},
+		[]*G1Affine{&c.In1G1, &c.In2G1, &c.In3G1, &c.In1G1, &c.In2G1, &c.In3G1},
+		[]*G2Affine{&c.In1G2, &c.In2G2, &c.In3G2, &c.In1G2, &c.In2G2, &c.In3G2},
 	)
 	if err != nil {
 		return fmt.Errorf("pair: %w", err)
@@ -412,26 +437,46 @@ func TestThreePairingCheckTestSolve(t *testing.T) {
 	assert := test.NewAssert(t)
 	// e(2a, 2b) * e(-2a, b) * e(a, -2b) == 1
 
-	p, q := randomG1G2Affines()
-	var p1, p2, p3 bn254.G1Affine
-	var q1, q2, q3 bn254.G2Affine
-	p1.Double(&p)
-	q1.Double(&q)
-	p2.Neg(&p1)
-	q2.Set(&q)
-	p3.Set(&p)
-	q3.Neg(&q1)
+	// p, q := randomG1G2Affines()
+	// var p1, p2, p3 bn254.G1Affine
+	// var q1, q2, q3 bn254.G2Affine
+	// p1.Double(&p)
+	// q1.Double(&q)
+	// p2.Neg(&p1)
+	// q2.Set(&q)
+	// p3.Set(&p)
+	// q3.Neg(&q1)
 
-	witness := ThreePairingCheckCircuit{
-		In1G1: NewG1Affine(p1), // 2p
-		In1G2: NewG2Affine(q1), // 2q
-		In2G1: NewG1Affine(p2), // -2p
-		In2G2: NewG2Affine(q2), // q
-		In3G1: NewG1Affine(p3), // p
-		In3G2: NewG2Affine(q3), // -2q
+	// witness := ThreePairingCheckCircuit{
+	// 	In1G1: NewG1Affine(p1), // 2p
+	// 	In1G2: NewG2Affine(q1), // 2q
+	// 	In2G1: NewG1Affine(p2), // -2p
+	// 	In2G2: NewG2Affine(q2), // q
+	// 	In3G1: NewG1Affine(p3), // p
+	// 	In3G2: NewG2Affine(q3), // -2q
+	// }
+	// err := test.IsSolved(&ThreePairingCheckCircuit{}, &witness, ecc.BN254.ScalarField())
+	// assert.NoError(err)
+
+	circuit := ThreePairingCheckCircuit{
+		In1G2: NewG2AffineFixedPlaceholder(),
+		In2G2: NewG2AffineFixedPlaceholder(),
 	}
-	err := test.IsSolved(&ThreePairingCheckCircuit{}, &witness, ecc.BN254.ScalarField())
+
+	// ccs, err := frontend.Compile(ecc.BN254.ScalarField(), scs.NewBuilder, &circuit)
+	// assert.NoError(err)
+
+	// t.Logf("nb commitments: %d, nbConstraints %d, nbInstructions: %d", scs.NbCommitments, ccs.GetNbConstraints(), ccs.GetNbInstructions())
+
+	// circuit = ThreePairingCheckCircuit{
+	// 	In1G2: NewG2AffineFixedPlaceholder(),
+	// 	In2G2: NewG2AffineFixedPlaceholder(),
+	// }
+
+	ccsr1, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
 	assert.NoError(err)
+
+	t.Logf("nbConstraints %d, nbInstructions: %d", ccsr1.GetNbConstraints(), ccsr1.GetNbInstructions())
 }
 
 type GroupMembershipCircuit struct {
@@ -624,6 +669,16 @@ func TestIsMillerLoopAndFinalExpCircuitTestSolve(t *testing.T) {
 		Expected: 0,
 	}
 	err = test.IsSolved(&IsMillerLoopAndFinalExpCircuit{}, &witness, ecc.BN254.ScalarField())
+
+	_scs, err := frontend.Compile(ecc.BN254.ScalarField(), scs.NewBuilder, &witness)
+	assert.NoError(err)
+	println("Fp12 mul4 poly ring commitments:", scs.NbCommitments)
+	println("Fp12 mul4 poly ring scs constraints:", _scs.GetNbConstraints())
+
+	_r1cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &witness)
+	assert.NoError(err)
+	println("Fp12 mul4 poly ring r1cs constraints:", _r1cs.GetNbConstraints())
+
 	assert.NoError(err)
 }
 

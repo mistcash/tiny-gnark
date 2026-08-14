@@ -513,20 +513,35 @@ func (f *Field[T]) performDeferredRingChecks(api frontend.API) error {
 		// Evaluations don't need to be reduced, we can reduce at the very end to
 		// when asserting equality.
 		for i, check := range group.checks {
-			// lhs = inputs_i_0(x)
+			// lhs = inputs_0(x)
 			lhs := f.evalPolyWithChallenge(check.inputs[0], xPowers)
+
+			if i == 0 {
+				println("lhs 0 eval overflow", lhs.overflow)
+			}
 
 			// lhs = ∏_j inputs_j(x)
 			for j := 1; j < len(check.inputs); j++ {
 				lhs = f.Mul(lhs, f.evalPolyWithChallenge(check.inputs[j], xPowers))
 			}
 
+			if i == 0 {
+				println("lhs all eval overflow", lhs.overflow)
+			}
+
 			// compute (∏_j inputs_j(x)) - r(x)
 			lhs = f.Sub(lhs, f.evalPolyWithChallenge(check.r, xPowers))
 			lhsEvals[i] = lhs
+
+			if i == 0 {
+				println("lhs sub overflow", lhs.overflow)
+			}
 		}
 
 		lhsRlc := f.InnerProductNoReduce(lhsEvals, zPowers)
+		lhsRlc = f.Reduce(lhsRlc)
+
+		println("lhsRlc overflow", lhsRlc.overflow)
 
 		if group.modEvalFn == nil {
 			group.modEvalFn = func(xPowers []*Element[T]) *Element[T] {
@@ -535,10 +550,14 @@ func (f *Field[T]) performDeferredRingChecks(api frontend.API) error {
 		}
 
 		// compute q_acc(x) * mod(x)
-		rhs := f.MulNoReduce(
-			f.evalPolyWithChallenge(group.qAcc, xPowers),
-			group.modEvalFn(xPowers),
-		)
+		q_acc := f.evalPolyWithChallenge(group.qAcc, xPowers)
+		// q_acc = f.Reduce(q_acc)
+		println("q_acc overflow", q_acc.overflow)
+
+		// compute q_acc(x) * mod(x)
+		rhs := f.MulNoReduce(q_acc, group.modEvalFn(xPowers))
+		println("mod overflow", group.modEvalFn(xPowers).overflow)
+		println("rhs overflow", rhs.overflow)
 
 		// AssertIsEqual reduces inputs for comparison
 		f.AssertIsEqual(lhsRlc, rhs)

@@ -13,7 +13,6 @@ import (
 	"github.com/consensys/gnark/std/math/emulated"
 )
 
-type basePoly = emulated.Poly[emulated.BN254Fp]
 type baseEl = emulated.Element[BaseField]
 type GTEl = fields_bn254.E12
 
@@ -242,10 +241,6 @@ func (pr *Pairing) PairingCheck(P []*G1Affine, Q []*G2Affine) error {
 		panic(err)
 	}
 	residueWitnessInv := pr.Ext12.FromTower([12]*baseEl{hint[0], hint[1], hint[2], hint[3], hint[4], hint[5], hint[6], hint[7], hint[8], hint[9], hint[10], hint[11]})
-	residueWitnessInvPoly := residueWitnessInv.ToPoly()
-
-	residueWitnessPoly := pr.InversePoly(residueWitnessInvPoly)
-	residueWitness := pr.Ext12.PolyToE12(residueWitnessPoly)
 
 	// constrain cubicNonResiduePower to be in Fp6
 	// that is: a100=a101=a110=a111=a120=a121=0
@@ -287,7 +282,7 @@ func (pr *Pairing) PairingCheck(P []*G1Affine, Q []*G2Affine) error {
 		lines[i] = *Q[i].Lines
 	}
 
-	res, err := pr.millerLoopLines(P, lines, residueWitnessInvPoly, residueWitnessPoly, false)
+	res, err := pr.millerLoopLines(P, lines, residueWitnessInv, false)
 	if err != nil {
 		return fmt.Errorf("miller loop: %w", err)
 	}
@@ -297,19 +292,17 @@ func (pr *Pairing) PairingCheck(P []*G1Affine, Q []*G2Affine) error {
 	// and residueWitnessInv, cubicNonResiduePower from the hint.
 	// Note that res is already MillerLoop(P,Q) * residueWitnessInv^{6x₀+2} since
 	// we initialized the Miller loop accumulator with residueWitnessInv.
-	res.Mul(cubicNonResiduePower.ToPoly())
+	t2 := pr.Ext12.Mul(&cubicNonResiduePower, res)
 
-	// residueWitnessInv^(q^3)
-	rwQ3 := pr.FrobeniusCube(residueWitnessInv)
-	res.Mul(rwQ3.ToPoly())
-	// residueWitnessInv^(-q^2) = residueWitness^(q^2)
-	rwQ2Inv := pr.FrobeniusSquare(residueWitness)
-	res.Mul(rwQ2Inv.ToPoly())
-	// residueWitnessInv^(q)
-	rwQ1 := pr.Frobenius(residueWitnessInv)
-	res.Mul(rwQ1.ToPoly())
+	t1 := pr.FrobeniusCube(residueWitnessInv)
+	t0 := pr.FrobeniusSquare(residueWitnessInv)
+	t1 = pr.Ext12.DivUnchecked(t1, t0)
+	t0 = pr.Frobenius(residueWitnessInv)
+	t1 = pr.Ext12.Mul(t1, t0)
 
-	pr.AssertIsEqual(pr.PolyToE12(res.Eval()), pr.Ext12.One())
+	t2 = pr.Ext12.Mul(t2, t1)
+
+	pr.AssertIsEqual(t2, pr.Ext12.One())
 
 	return nil
 }
@@ -547,12 +540,12 @@ func (pr *Pairing) MillerLoop(P []*G1Affine, Q []*G2Affine) (*GTEl, error) {
 		}
 		lines[i] = *Q[i].Lines
 	}
-	res, err := pr.millerLoopLines(P, lines, nil, nil, true)
-	return pr.PolyToE12(res.Eval()), err
+	return pr.millerLoopLines(P, lines, nil, true)
+
 }
 
 // millerLoopLines computes the multi-Miller loop from points in G1 and precomputed lines in G2
-func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init, initInv *basePoly, first bool) (*emulated.PolyRingAccumulator[BaseField], error) {
+func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init *GTEl, first bool) (*GTEl, error) {
 
 	// check input size match
 	n := len(P)
@@ -575,92 +568,157 @@ func (pr *Pairing) millerLoopLines(P []*G1Affine, lines []lineEvaluations, init,
 	}
 
 	// Compute f_{6x₀+2,Q}(P)
-	res := pr.NewPolyRingAccumulator(69)
+	var prodLines [10]*baseEl
+	res := pr.Ext12.One()
 
+	var initInv GTEl
 	if init != nil {
-		if initInv == nil {
-			panic("initInv cannot be nil when init is not nil")
-		}
-		pr.PolyRingChecker().ToCommit(init.Coeffs...)
-		pr.PolyRingChecker().ToCommit(initInv.Coeffs...)
-		res.Mul(init)
+		res = init
+		initInv = *pr.Ext12.Inverse(init)
 	}
 
 	j := len(loopCounter) - 2
+	if first {
+		// i = j
+		// k = 0
+		c3 := pr.Ext2.MulByElement(&lines[0][0][j].R0, xNegOverY[0])
+		c4 := pr.Ext2.MulByElement(&lines[0][0][j].R1, yInv[0])
+		nine := big.NewInt(9)
+		res = &GTEl{
+			A0:  *pr.curveF.One(),
+			A1:  *pr.curveF.Sub(&c3.A0, pr.curveF.MulConst(&c3.A1, nine)),
+			A2:  *pr.curveF.Zero(),
+			A3:  *pr.curveF.Sub(&c4.A0, pr.curveF.MulConst(&c4.A1, nine)),
+			A4:  *pr.curveF.Zero(),
+			A5:  *pr.curveF.Zero(),
+			A6:  *pr.curveF.Zero(),
+			A7:  c3.A1,
+			A8:  *pr.curveF.Zero(),
+			A9:  c4.A1,
+			A10: *pr.curveF.Zero(),
+			A11: *pr.curveF.Zero(),
+		}
+
+		if n >= 2 {
+			// k = 1, separately to avoid MulBy01379 (res × ℓ)
+			// (res is also a line at this point, so we use Mul01379By01379 ℓ × ℓ)
+			// line evaluation at P[1]
+			prodLines = pr.Mul01379By01379(
+				pr.Ext2.MulByElement(&lines[1][0][j].R0, xNegOverY[1]), //nolint: gosec // incorrectly flagged by gosec as out of bounds read (G602)
+				pr.Ext2.MulByElement(&lines[1][0][j].R1, yInv[1]),      //nolint: gosec // incorrectly flagged by gosec as out of bounds read (G602)
+				c3,
+				c4,
+			)
+			res = &GTEl{
+				A0:  *prodLines[0],
+				A1:  *prodLines[1],
+				A2:  *prodLines[2],
+				A3:  *prodLines[3],
+				A4:  *prodLines[4],
+				A5:  *pr.curveF.Zero(),
+				A6:  *prodLines[5],
+				A7:  *prodLines[6],
+				A8:  *prodLines[7],
+				A9:  *prodLines[8],
+				A10: *prodLines[9],
+				A11: *pr.curveF.Zero(),
+			}
+		}
+
+		if n >= 3 {
+			// k >= 2: batch lines 2-by-2
+			for k := 3; k < n; k += 2 {
+				prodLines = pr.Mul01379By01379(
+					pr.Ext2.MulByElement(&lines[k][0][j].R0, xNegOverY[k]),
+					pr.Ext2.MulByElement(&lines[k][0][j].R1, yInv[k]),
+					pr.Ext2.MulByElement(&lines[k-1][0][j].R0, xNegOverY[k-1]),
+					pr.Ext2.MulByElement(&lines[k-1][0][j].R1, yInv[k-1]),
+				)
+				res = pr.Ext12.MulBy012346789(res, prodLines)
+			}
+			// Handle remaining line if (n-2) is odd
+			if (n-2)%2 != 0 {
+				res = pr.MulBy01379(
+					res,
+					pr.Ext2.MulByElement(&lines[n-1][0][j].R0, xNegOverY[n-1]),
+					pr.Ext2.MulByElement(&lines[n-1][0][j].R1, yInv[n-1]),
+				)
+			}
+		}
+		j--
+	}
 
 	for i := j; i >= 0; i-- {
-		// res²
-		res.Sqr()
+		res = pr.Ext12.Square(res)
 
 		switch loopCounter[i] {
 		case 0:
 			// Batch lines 2-by-2 across pairs using sparse×sparse multiplication
-			for k := 0; k < n; k += 1 {
-				res.Mul(pr.ToPoly01379(
+			for k := 1; k < n; k += 2 {
+				prodLines = pr.Mul01379By01379(
 					pr.Ext2.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][0][i].R1, yInv[k]),
-				))
+					pr.Ext2.MulByElement(&lines[k-1][0][i].R0, xNegOverY[k-1]),
+					pr.Ext2.MulByElement(&lines[k-1][0][i].R1, yInv[k-1]),
+				)
+				res = pr.Ext12.MulBy012346789(res, prodLines)
 			}
-			// return pr.Ext12.One(), nil
+			// Handle odd remaining line
+			if n%2 != 0 {
+				res = pr.MulBy01379(
+					res,
+					pr.Ext2.MulByElement(&lines[n-1][0][i].R0, xNegOverY[n-1]),
+					pr.Ext2.MulByElement(&lines[n-1][0][i].R1, yInv[n-1]),
+				)
+			}
 		case 1:
 			if init != nil {
 				// multiply by init when bit=1
-				res.Mul(init)
+				res = pr.Ext12.Mul(res, init)
 			}
+			// ℓ × ℓ
 			for k := 0; k < n; k++ {
-				// ℓ × res
-				res.Mul(pr.ToPoly01379(
+				prodLines := pr.Mul01379By01379(
 					pr.Ext2.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][0][i].R1, yInv[k]),
-				)).Mul(pr.ToPoly01379(
 					pr.Ext2.MulByElement(&lines[k][1][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][1][i].R1, yInv[k]),
-				))
-				// (ℓ × ℓ)
+				)
+				// (ℓ × ℓ) × res
+				res = pr.Ext12.MulBy012346789(res, prodLines)
 			}
 		case -1:
 			if init != nil {
 				// multiply by 1/init when bit=-1
-				res.Mul(initInv)
+				res = pr.Ext12.Mul(res, &initInv)
 			}
 			for k := 0; k < n; k++ {
-				// ℓ × res
-				res.Mul(pr.ToPoly01379(
+				// ℓ × ℓ
+				prodLines := pr.Mul01379By01379(
 					pr.Ext2.MulByElement(&lines[k][0][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][0][i].R1, yInv[k]),
-				)).Mul(pr.ToPoly01379(
 					pr.Ext2.MulByElement(&lines[k][1][i].R0, xNegOverY[k]),
 					pr.Ext2.MulByElement(&lines[k][1][i].R1, yInv[k]),
-				))
-				// (ℓ × ℓ)
+				)
+				// (ℓ × ℓ) × res
+				res = pr.Ext12.MulBy012346789(res, prodLines)
 			}
 		default:
 			panic(fmt.Sprintf("invalid loop counter value %d", loopCounter[i]))
 		}
-		res.Eval()
 	}
 
 	// Compute  ℓ_{[6x₀+2]Q,π(Q)}(P) · ℓ_{[6x₀+2]Q+π(Q),-π²(Q)}(P)
 	// lines evaluations at P
 	// and ℓ × ℓ
 	for k := 0; k < n; k++ {
-		// prodLines = pr.Mul01379By01379(
-		// 	pr.Ext2.MulByElement(&lines[k][0][65].R0, xNegOverY[k]),
-		// 	pr.Ext2.MulByElement(&lines[k][0][65].R1, yInv[k]),
-		// 	pr.Ext2.MulByElement(&lines[k][1][65].R0, xNegOverY[k]),
-		// 	pr.Ext2.MulByElement(&lines[k][1][65].R1, yInv[k]),
-		// )
-		res.Mul(
-			pr.ToPoly01379(
-				pr.Ext2.MulByElement(&lines[k][0][65].R0, xNegOverY[k]),
-				pr.Ext2.MulByElement(&lines[k][0][65].R1, yInv[k]),
-			),
-		).Mul(
-			pr.ToPoly01379(
-				pr.Ext2.MulByElement(&lines[k][1][65].R0, xNegOverY[k]),
-				pr.Ext2.MulByElement(&lines[k][1][65].R1, yInv[k]),
-			),
+		prodLines = pr.Mul01379By01379(
+			pr.Ext2.MulByElement(&lines[k][0][65].R0, xNegOverY[k]),
+			pr.Ext2.MulByElement(&lines[k][0][65].R1, yInv[k]),
+			pr.Ext2.MulByElement(&lines[k][1][65].R0, xNegOverY[k]),
+			pr.Ext2.MulByElement(&lines[k][1][65].R1, yInv[k]),
 		)
+		res = pr.Ext12.MulBy012346789(res, prodLines)
 	}
 
 	return res, nil
@@ -825,24 +883,11 @@ func (pr *Pairing) MillerLoopAndMul(P *G1Affine, Q *G2Affine, previous *GTEl) (*
 
 // millerLoopAndFinalExpResult computes the Miller loop between P and Q,
 // multiplies it in 𝔽p¹² by previous and returns the result.
-func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, previous *GTEl) *GTEl {
+func (pr *Pairing) millerLoopAndFinalExpResult(P *G1Affine, Q *G2Affine, previous *GTEl) *GTEl {
 	tower := pr.ToTower(previous)
 
-	if len(P) != len(Q) {
-		return nil
-	}
-
-	inputs := make([]*baseEl, 0, 2*len(P)+4*len(Q)+12)
-	for _, p := range P {
-		inputs = append(inputs, &p.X, &p.Y)
-	}
-	for _, q := range Q {
-		inputs = append(inputs, &q.P.X.A0, &q.P.X.A1, &q.P.Y.A0, &q.P.Y.A1)
-	}
-	inputs = append(inputs, tower[0], tower[1], tower[2], tower[3], tower[4], tower[5], tower[6], tower[7], tower[8], tower[9], tower[10], tower[11])
-
 	// hint the non-residue witness
-	hint, err := pr.curveF.NewHint(millerLoopAndCheckFinalExpHint, 18, inputs...)
+	hint, err := pr.curveF.NewHint(millerLoopAndCheckFinalExpHint, 18, &P.X, &P.Y, &Q.P.X.A0, &Q.P.X.A1, &Q.P.Y.A0, &Q.P.Y.A1, tower[0], tower[1], tower[2], tower[3], tower[4], tower[5], tower[6], tower[7], tower[8], tower[9], tower[10], tower[11])
 	if err != nil {
 		// err is non-nil only for invalid number of inputs
 		panic(err)
@@ -880,29 +925,19 @@ func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, pre
 		A11: *pr.curveF.Zero(),
 	}
 
-	residueWitnessPoly := residueWitness.ToPoly()
 	// residueWitnessInv = 1 / residueWitness
-	residueWitnessInvPoly := pr.Ext12.InversePoly(residueWitnessPoly)
-	residueWitnessInv := pr.Ext12.PolyToE12(residueWitnessInvPoly)
+	residueWitnessInv := pr.Ext12.Inverse(residueWitness)
 
-	n := len(P)
-	if n == 0 || n != len(Q) {
-		panic("invalid inputs sizes")
+	if Q.Lines == nil {
+		Qlines := pr.computeLines(&Q.P)
+		Q.Lines = &Qlines
 	}
-	lines := make([]lineEvaluations, len(Q))
-	for i := range Q {
-		if Q[i].Lines == nil {
-			Qlines := pr.computeLines(&Q[i].P)
-			Q[i].Lines = &Qlines
-		}
-		lines[i] = *Q[i].Lines
-	}
+	lines := *Q.Lines
 
-	resA, err := pr.millerLoopLines(
-		P,
-		lines,
-		residueWitnessInvPoly,
-		residueWitnessPoly,
+	res, err := pr.millerLoopLines(
+		[]*G1Affine{P},
+		[]lineEvaluations{lines},
+		residueWitnessInv,
 		false,
 	)
 	if err != nil {
@@ -910,7 +945,7 @@ func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, pre
 	}
 
 	// multiply by previous multi-Miller function
-	res := pr.Ext12.Mul(pr.Ext12.PolyToE12(resA.Eval()), previous)
+	res = pr.Ext12.Mul(res, previous)
 
 	// Check that  res * cubicNonResiduePower * residueWitnessInv^λ' == 1
 	// where λ' = q^3 - q^2 + q, with u the BN254 seed
@@ -928,30 +963,6 @@ func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, pre
 	t2 = pr.Ext12.Mul(t2, t1)
 
 	return t2
-	// res.Eval();
-
-	// // multiply by previous multi-Miller function
-	// res.Mul(previous.ToPoly())
-
-	// // Check that  res * cubicNonResiduePower * residueWitnessInv^λ' == 1
-	// // where λ' = q^3 - q^2 + q, with u the BN254 seed
-	// // and residueWitnessInv, cubicNonResiduePower from the hint.
-	// // Note that res is already MillerLoop(P,Q) * residueWitnessInv^{6x₀+2} since
-	// // we initialized the Miller loop accumulator with residueWitnessInv.
-
-	// res.Mul(cubicNonResiduePower.ToPoly())
-
-	// // residueWitnessInv^(q^3)
-	// rwQ3 := pr.FrobeniusCube(residueWitnessInv)
-	// res.Mul(rwQ3.ToPoly())
-	// // residueWitnessInv^(-q^2) = residueWitness^(q^2)
-	// rwQ2Inv := pr.FrobeniusSquare(residueWitness)
-	// res.Mul(rwQ2Inv.ToPoly())
-	// // residueWitnessInv^(q)
-	// rwQ1 := pr.Frobenius(residueWitnessInv)
-	// res.Mul(rwQ1.ToPoly())
-
-	// return pr.PolyToE12(res.Eval())
 }
 
 // IsMillerLoopAndFinalExpOne computes the Miller loop between P and Q,
@@ -965,25 +976,10 @@ func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, pre
 //
 // [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
 func (pr *Pairing) IsMillerLoopAndFinalExpOne(P *G1Affine, Q *G2Affine, previous *GTEl) frontend.Variable {
-	t2 := pr.millerLoopAndFinalExpResult([]*G1Affine{P}, []*G2Affine{Q}, previous)
+	t2 := pr.millerLoopAndFinalExpResult(P, Q, previous)
 
 	res := pr.IsEqual(t2, pr.Ext12.One())
 	return res
-}
-
-// AssertMultiMillerLoopAndFinalExpIsOne computes the Miller loop between
-// P and Q and multiplies it in 𝔽p¹² by previous.
-// multiplies it in 𝔽p¹² by previous and returns a boolean indicating if
-// the result lies in the same equivalence class as the reduced pairing
-// purported to be 1. This check replaces the final exponentiation step
-// in-circuit and follows Section 4 of [On Proving Pairings] paper by A.
-// Novakovic and L. Eagen.
-//
-// [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
-func (pr *Pairing) AssertMultiMillerLoopAndFinalExpIsOne(P []*G1Affine, Q []*G2Affine, previous *GTEl) {
-	// t2 := pr.millerLoopAndFinalExpResult(P, Q, pr.Ext12.Mul(previous, pr.Ext12.Inverse(previous)))
-	t2 := pr.millerLoopAndFinalExpResult(P, Q, previous)
-	pr.AssertIsEqual(t2, pr.Ext12.One())
 }
 
 // AssertMillerLoopAndFinalExpIsOne computes the Miller loop between P and Q,
@@ -996,6 +992,6 @@ func (pr *Pairing) AssertMultiMillerLoopAndFinalExpIsOne(P []*G1Affine, Q []*G2A
 //
 // [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
 func (pr *Pairing) AssertMillerLoopAndFinalExpIsOne(P *G1Affine, Q *G2Affine, previous *GTEl) {
-	t2 := pr.millerLoopAndFinalExpResult([]*G1Affine{P}, []*G2Affine{Q}, previous)
+	t2 := pr.millerLoopAndFinalExpResult(P, Q, previous)
 	pr.AssertIsEqual(t2, pr.Ext12.One())
 }

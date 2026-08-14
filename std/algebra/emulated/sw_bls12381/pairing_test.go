@@ -435,6 +435,28 @@ func TestThreePairingCheckTestSolve(t *testing.T) {
 	}
 	err := test.IsSolved(&ThreePairingCheckCircuit{}, &witness, ecc.BN254.ScalarField())
 	assert.NoError(err)
+
+	circuit := ThreePairingCheckCircuit{
+		In1G2: NewG2AffineFixedPlaceholder(),
+		In2G2: NewG2AffineFixedPlaceholder(),
+	}
+
+	t.Logf("Two fixed 3-pairing")
+
+	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), scs.NewBuilder, &circuit)
+	assert.NoError(err)
+
+	t.Logf("nb commitments: %d, nbConstraints %d, nbInstructions: %d", scs.NbCommitments, ccs.GetNbConstraints(), ccs.GetNbInstructions())
+
+	circuit = ThreePairingCheckCircuit{
+		In1G2: NewG2AffineFixedPlaceholder(),
+		In2G2: NewG2AffineFixedPlaceholder(),
+	}
+
+	ccs, err = frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
+	assert.NoError(err)
+
+	t.Logf("nb commitments: %d, nbConstraints %d, nbInstructions: %d", scs.NbCommitments, ccs.GetNbConstraints(), ccs.GetNbInstructions())
 }
 
 type GroupMembershipCircuit struct {

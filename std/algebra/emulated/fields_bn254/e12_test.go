@@ -6,6 +6,7 @@ import (
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bn254"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/frontend/cs/r1cs"
 	"github.com/consensys/gnark/test"
 )
 
@@ -158,6 +159,10 @@ func TestMulFp12PolyRing(t *testing.T) {
 
 	err := test.IsSolved(&e12MulPolyRing{}, &witness, ecc.BN254.ScalarField())
 	assert.NoError(err)
+
+	cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &e12MulPolyRing{})
+	assert.NoError(err)
+	assert.NotZero(cs.GetNbConstraints())
 }
 
 type e12Div struct {

@@ -773,13 +773,22 @@ func (builder *builder[E]) Commit(v ...frontend.Variable) (frontend.Variable, er
 
 	committed := builder.AddPlonkCommitmentInputs(dedup[1:])
 
-	dedup[0] = len(commitments) // commitment depth
+	commitmentDepth := len(commitments)
+	dedup[0] = commitmentDepth
 	outs, err := builder.NewHint(cs.Bsb22CommitmentComputePlaceholder, 1, dedup...)
 	if err != nil {
 		return nil, err
 	}
 	outs = outs[:1]
-	return outs[0], builder.AddPlonkCommitmentOutputs(committed, outs)
+	if err := builder.AddPlonkCommitmentOutputs(committed, outs); err != nil {
+		return nil, err
+	}
+	caller := "unknown"
+	if _, file, line, ok := runtime.Caller(1); ok {
+		caller = fmt.Sprintf("%s:%d", filepath.ToSlash(file), line)
+	}
+	fmt.Printf("api.Commit %s commitmentIndex=%d\n", caller, commitmentDepth)
+	return outs[0], nil
 }
 
 // EvaluatePlonkExpression in the form of res = qL.a + qR.b + qM.ab + qC

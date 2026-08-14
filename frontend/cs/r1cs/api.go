@@ -921,6 +921,11 @@ func (builder *builder[E]) Commit(v ...frontend.Variable) (frontend.Variable, er
 	if err := builder.cs.AddCommitment(commitment); err != nil {
 		return nil, err
 	}
+	caller := "unknown"
+	if _, file, line, ok := runtime.Caller(1); ok {
+		caller = fmt.Sprintf("%s:%d", filepath.ToSlash(file), line)
+	}
+	fmt.Printf("api.Commit %s commitmentIndex=%d\n", caller, commitmentDepth)
 
 	return res, nil
 }
