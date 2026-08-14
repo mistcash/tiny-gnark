@@ -88,6 +88,41 @@ is binding exactly when the range checks force `|E| < q/2`, whereupon (3) gives 
 and hence `a·b ≡ r (mod p)`. **The soundness of the baseline is a magnitude argument about `k`.**
 This is the property that the aggregation below must preserve — and does not.
 
+**The freedom of `c` is not by itself a break.** The same reduction applies verbatim to the
+aggregated check of §4, so it is tempting to conclude that if the aggregate falls, so must the
+per-check identity. The reduction is shared; the consequence is not. What Lemma 1 leaves behind
+is a single congruence in which *something* multiplies `p`, and the question is only whether that
+something is magnitude-bounded:
+
+| | multiplier of `p` in the residual congruence | bounded? |
+|---|---|---|
+| baseline (1) | `k`, range-checked to `n_k` limbs | yes — binding iff the bound is tight enough |
+| aggregate (4) | `K`, a hinted accumulator | no — vacuous unconditionally (Theorem 1) |
+
+So `c`'s freedom is necessary but not sufficient for a forgery. Whether the baseline's residual
+obligation is tight enough is a question about `n_k·w` versus `log2 q`, taken up in Appendix B.
+
+### 2.4 The two ways to close the argument
+
+Identities (1) and (2) can be made binding by range-checking *either* `k` *or* `c` — these are
+alternatives, not both requirements.
+
+* **Bound `c`.** Every coefficient of (1) is then bounded by `< q/2`, so the identity lifts from
+  `F_q[X]` to `Z[X]`. Evaluating the lifted identity at `X = t` annihilates the carry term and
+  yields `a·b - r - k·p = 0` over `Z` *exactly*. No bound on `k` is required, and the conclusion
+  holds for every `p`, `q`, `w`.
+* **Bound `k`.** The identity stays in `F_q[X]`, Lemma 1 reduces it to congruence (3), and
+  soundness then needs the range checks to force `|E| < q/2` — a condition on the parameters.
+
+`std/math/emulated` takes the second route. That choice is what makes the baseline's soundness
+parameter-dependent, and it is also what makes the quotient unbatchable: the first route
+constrains a *degree/divisibility* property, which survives linear combination, whereas the
+second constrains a *magnitude*, which does not (§5.5).
+
+It is worth noting that the routes do not compose in the way one might hope. Under the first
+route `k` is unconstrained and therefore free to aggregate — but then `C = sum_i z^i·c_i` loses
+the magnitude bound that route depends on. The obstruction moves; it does not disappear.
+
 *(An observation about how tightly the shipped parameters actually enforce `|E| < q/2` is
 recorded separately in Appendix B; it is independent of the RLC work and is not relied on
 anywhere in §5.)*
@@ -178,9 +213,10 @@ Three things are worth drawing out.
 ### 5.2 Confirmation against the implementation
 
 `M127` (`p = 2^127 - 1`, two 64-bit limbs over BN254) is a parameterisation in which the
-per-check quotient range check *is* binding: the same class of forgery is rejected on the
+per-check quotient range check does real work: the same class of forgery is rejected on the
 pre-RLC code, because the forged quotient does not fit its 192-bit budget. It is therefore a
-clean separator.
+clean separator. It is *not* a claim that `M127` is fully sound — see Appendix B — only that any
+forgery accepted there is attributable to the aggregation.
 
 | configuration | pre-RLC path | RLC path |
 |---|---|---|
@@ -368,12 +404,43 @@ go test ./std/math/emulated/ -run TestForgeRLCAggregation -v
 Constructs the Theorem 1 forgery against the branch's aggregation on `M127` and reports whether
 the constraint system accepts `a*b = a*b + 1 mod p`.
 
-## Appendix B: a separate observation on the baseline quotient budget
+## Appendix B: the baseline quotient budget
 
-Independently of the RLC work, §2.3 shows the baseline's binding rests on the range checks
-forcing `|a·b - r - k·p| < q/2`. Whether the budget `callMulHint` grants the quotient
-(`n_k·w` bits) is tight enough for that inequality is a property of the *baseline* and of the
-emulation parameters, and deserves its own analysis. Nothing in §5 depends on the answer:
-Theorem 1 holds for every parameterisation, and Theorem 2 reduces the aggregate exactly to the
-per-check statement, whatever that statement is worth. This is deliberately not developed here —
-see the accompanying note to the maintainer.
+Independently of the RLC work, §2.3 reduces the baseline to congruence (3) with `k` the only
+bounded unknown. The residual obligation on a cheating prover is therefore:
+
+> given `a`, `b` and a chosen wrong remainder `r'`, find `k` inside the range-check budget with
+> `k ≡ (a·b - r')·p^{-1} (mod q)`.
+
+The congruence fixes `k` modulo `q`, so the smallest admissible representative is `< q`. It fits
+the budget whenever
+
+```
+n_k · w  >=  log2 q                                                             (6)
+```
+
+and then the check accepts an arbitrary `r'`. Since the honest quotient satisfies `k ~ p`, the
+budget must be at least `log2 p` rounded up to whole limbs, so (6) fails only when the emulated
+modulus is smaller than the native one by roughly a limb. Budgets computed by `callMulHint`
+against BN254 (`log2 q = 254`):
+
+| emulated modulus | `n_k · w` | (6) holds? |
+|---|---|---|
+| `BN254Fp` (254 bits) | 320 | yes |
+| `Secp256k1Fp` (256) | 320 | yes |
+| `BLS12381Fp` (381) | 448 | yes |
+| `M127` (127) | 192 | no |
+
+Where (6) fails the check is not thereby sound, only harder to defeat: the attacker may search
+over admissible `r'` until the representative happens to land inside the budget, which succeeds
+with probability about `2^(n_k·w - log2 q)` per trial. The residual security is roughly
+`log2 q - n_k·w` bits — for `M127`, on the order of 2^62 work rather than the ~2^254 the
+construction is meant to provide.
+
+Both observations concern the *baseline* and are orthogonal to §5: Theorem 1 holds for every
+parameterisation, and Theorem 2 reduces the aggregate exactly to the per-check statement,
+whatever that statement is worth. Section 2.4 gives the structural fix — range-check the carries
+instead, which lifts the identity to `Z[X]` and removes the parameter dependence entirely.
+
+A proof-of-concept is deliberately not included in this repository; see the accompanying note to
+the maintainer.
