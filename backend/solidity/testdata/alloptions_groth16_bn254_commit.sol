@@ -82,17 +82,21 @@ contract Verifier is IVerifier {
     uint256 constant DELTA_NEG_X_1 = 15500463297842106913511293274389876880081939523188453720906302504861708674837;
     uint256 constant DELTA_NEG_Y_0 = 9962083143153938537809714189018639226499079348886946047793166527526677806574;
     uint256 constant DELTA_NEG_Y_1 = 4954080567056970791336845579716779471522351107235569901443040486823427231817;
-    // Pedersen G point in G2 in powers of i
+    // Pedersen G point in G2 in powers of i. Shared by every commitment:
+    // groth16 Setup samples one G2 base for the whole circuit, and
+    // pedersen.BatchVerifyMultiVk relies on that invariant.
     uint256 constant PEDERSEN_G_X_0 = 18493247542585565776745323258312724450139420039850948351251628081187893320199;
     uint256 constant PEDERSEN_G_X_1 = 5003008321481450760750713447711574821243088038989177350509144414549815502336;
     uint256 constant PEDERSEN_G_Y_0 = 9618912493610487091730954971459762071312209480642045982481147428675044896088;
     uint256 constant PEDERSEN_G_Y_1 = 8455700382049054628913710000766760186425344408075695062591160275064901141580;
 
-    // Pedersen GSigmaNeg point in G2 in powers of i
-    uint256 constant PEDERSEN_GSIGMANEG_X_0 = 3569967469961768489629942912985397282432301993215580749683011909364249308811;
-    uint256 constant PEDERSEN_GSIGMANEG_X_1 = 12224395597839733115731768335378200545618215383902092190643910321820665448214;
-    uint256 constant PEDERSEN_GSIGMANEG_Y_0 = 2160463708538706527736362510479614169178649526411766422570812540334672394277;
-    uint256 constant PEDERSEN_GSIGMANEG_Y_1 = 5029839044774911112086311899107010067839820997944832758244978694546523307854;
+    // Pedersen GSigmaNeg points in G2 in powers of i, one per commitment.
+    // Unlike G, the sigma trapdoor is sampled independently for each
+    // commitment key, so these differ across commitments.
+    uint256 constant PEDERSEN_GSIGMANEG_0_X_0 = 3569967469961768489629942912985397282432301993215580749683011909364249308811;
+    uint256 constant PEDERSEN_GSIGMANEG_0_X_1 = 12224395597839733115731768335378200545618215383902092190643910321820665448214;
+    uint256 constant PEDERSEN_GSIGMANEG_0_Y_0 = 2160463708538706527736362510479614169178649526411766422570812540334672394277;
+    uint256 constant PEDERSEN_GSIGMANEG_0_Y_1 = 5029839044774911112086311899107010067839820997944832758244978694546523307854;
 
     // Constant and public input points
     uint256 constant CONSTANT_X = 1639178264568766992985400269072817781086633557929671902629297762337615215927;
@@ -410,6 +414,9 @@ contract Verifier is IVerifier {
             let s
             mstore(f, CONSTANT_X)
             mstore(add(f, 0x20), CONSTANT_Y)
+            // ECADD only takes two points at a time, so summing more than
+            // two commitments needs a pairwise reduction rather than a
+            // single call over all of them.
             mstore(g, mload(commitments))
             mstore(add(g, 0x20), mload(add(commitments, 0x20)))
             success := and(success,  staticcall(gas(), PRECOMPILE_ADD, f, 0x80, f, 0x40))
@@ -540,26 +547,34 @@ contract Verifier is IVerifier {
                     )
                 )
             ) % R;
-            // Commitments
-            pairings[ 0] = commitments[0];
-            pairings[ 1] = commitments[1];
-            pairings[ 2] = PEDERSEN_GSIGMANEG_X_1;
-            pairings[ 3] = PEDERSEN_GSIGMANEG_X_0;
-            pairings[ 4] = PEDERSEN_GSIGMANEG_Y_1;
-            pairings[ 5] = PEDERSEN_GSIGMANEG_Y_0;
-            pairings[ 6] = Px;
-            pairings[ 7] = Py;
-            pairings[ 8] = PEDERSEN_G_X_1;
-            pairings[ 9] = PEDERSEN_G_X_0;
-            pairings[10] = PEDERSEN_G_Y_1;
-            pairings[11] = PEDERSEN_G_Y_0;
+
+            // Fold the commitments and their proof of knowledge into a
+            // single (numCommitments+1)-pairing check, mirroring
+            // gnark-crypto's pedersen.BatchVerifyMultiVk: each commitment
+            // gets its own GSigmaNeg (the sigma trapdoor is sampled
+            // independently per commitment key) scaled by successive
+            // powers of the challenge, and the already-folded proof of
+            // knowledge is checked once against the shared G.
+            uint256[12] memory pedersenPairings;
+            pedersenPairings[0] = commitments[0];
+            pedersenPairings[1] = commitments[1];
+            pedersenPairings[2] = PEDERSEN_GSIGMANEG_0_X_1;
+            pedersenPairings[3] = PEDERSEN_GSIGMANEG_0_X_0;
+            pedersenPairings[4] = PEDERSEN_GSIGMANEG_0_Y_1;
+            pedersenPairings[5] = PEDERSEN_GSIGMANEG_0_Y_0;
+            pedersenPairings[6] = Px;
+            pedersenPairings[7] = Py;
+            pedersenPairings[8] = PEDERSEN_G_X_1;
+            pedersenPairings[9] = PEDERSEN_G_X_0;
+            pedersenPairings[10] = PEDERSEN_G_Y_1;
+            pedersenPairings[11] = PEDERSEN_G_Y_0;
 
             // Verify pedersen commitments
             bool success;
             assembly ("memory-safe") {
                 let f := mload(0x40)
 
-                success := staticcall(gas(), PRECOMPILE_VERIFY, pairings, 0x180, f, 0x20)
+                success := staticcall(gas(), PRECOMPILE_VERIFY, pedersenPairings, 0x180, f, 0x20)
                 success := and(success, mload(f))
             }
             if (!success) {
@@ -657,23 +672,32 @@ contract Verifier is IVerifier {
             publicCommitments[0] = uint256(keccak256(hashInput)) % R;
         }
 
+        // Fold the commitments and their proof of knowledge into a single
+        // (numCommitments+1)-pairing check, mirroring gnark-crypto's
+        // pedersen.BatchVerifyMultiVk: each commitment gets its own
+        // GSigmaNeg (the sigma trapdoor is sampled independently per
+        // commitment key) scaled by successive powers of the challenge,
+        // and the already-folded proof of knowledge is checked once
+        // against the shared G.
+        uint256[12] memory pedersenPairings;
+        pedersenPairings[0] = commitments[0];
+        pedersenPairings[1] = commitments[1];
+        pedersenPairings[2] = PEDERSEN_GSIGMANEG_0_X_1;
+        pedersenPairings[3] = PEDERSEN_GSIGMANEG_0_X_0;
+        pedersenPairings[4] = PEDERSEN_GSIGMANEG_0_Y_1;
+        pedersenPairings[5] = PEDERSEN_GSIGMANEG_0_Y_0;
+        pedersenPairings[8] = PEDERSEN_G_X_1;
+        pedersenPairings[9] = PEDERSEN_G_X_0;
+        pedersenPairings[10] = PEDERSEN_G_Y_1;
+        pedersenPairings[11] = PEDERSEN_G_Y_0;
+
         // Verify pedersen commitments
         bool success;
         assembly ("memory-safe") {
+            calldatacopy(add(pedersenPairings, 0xc0), add(proof.offset, 0x140), 0x40) // Copy PoK
             let f := mload(0x40)
 
-            calldatacopy(f, add(proof.offset, 0x100), 0x40) // Copy first commitment
-            mstore(add(f, 0x40), PEDERSEN_GSIGMANEG_X_1)
-            mstore(add(f, 0x60), PEDERSEN_GSIGMANEG_X_0)
-            mstore(add(f, 0x80), PEDERSEN_GSIGMANEG_Y_1)
-            mstore(add(f, 0xa0), PEDERSEN_GSIGMANEG_Y_0)
-            calldatacopy(add(f, 0xc0), add(proof.offset, 0x140), 0x40) // Copy PoK
-            mstore(add(f, 0x100), PEDERSEN_G_X_1)
-            mstore(add(f, 0x120), PEDERSEN_G_X_0)
-            mstore(add(f, 0x140), PEDERSEN_G_Y_1)
-            mstore(add(f, 0x160), PEDERSEN_G_Y_0)
-
-            success := staticcall(gas(), PRECOMPILE_VERIFY, f, 0x180, f, 0x20)
+            success := staticcall(gas(), PRECOMPILE_VERIFY, pedersenPairings, 0x180, f, 0x20)
             success := and(success, mload(f))
         }
         if (!success) {

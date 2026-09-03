@@ -72,6 +72,41 @@ func (c *twoCommitCircuit) Define(api frontend.API) error {
 	return nil
 }
 
+// threeCommitCircuit makes three chained api.Commit calls. Chaining matters:
+// the committed values of commit2 (resp. commit3) include commit1's (resp.
+// commit2's) hash wire, which the Solidity verifier has to substitute with the
+// hash it derived from the earlier commitment. It also carries a real public
+// input: a circuit whose only public values are commitments would export an
+// illegal `uint256[0] calldata` parameter.
+type threeCommitCircuit struct {
+	A, B, C frontend.Variable
+	Product frontend.Variable `gnark:",public"`
+}
+
+func (c *threeCommitCircuit) Define(api frontend.API) error {
+	res := api.Mul(api.Mul(c.A, c.B), c.C)
+	api.AssertIsEqual(res, c.Product)
+	cmter, ok := api.(frontend.Committer)
+	if !ok {
+		return fmt.Errorf("api does not support commitment")
+	}
+	cmt1, err := cmter.Commit(c.A)
+	if err != nil {
+		return err
+	}
+	cmt2, err := cmter.Commit(c.B, cmt1)
+	if err != nil {
+		return err
+	}
+	cmt3, err := cmter.Commit(c.C, cmt2)
+	if err != nil {
+		return err
+	}
+	api.AssertIsDifferent(cmt1, cmt2)
+	api.AssertIsDifferent(cmt2, cmt3)
+	return nil
+}
+
 // curveShortName returns a short filesystem-friendly name for the curve.
 func curveShortName(id ecc.ID) string {
 	switch id {
@@ -185,12 +220,25 @@ func TestSingleCommitment(t *testing.T) {
 }
 
 func TestTwoCommitments(t *testing.T) {
-	// should succeed with PLONK only.
-	// - but for PLONK only if the hash-to-field is the default one. If not, then it should fail.
+	// should succeed with PLONK, and with GROTH16 now that the Solidity
+	// verifier folds the commitments' proofs of knowledge.
 	assert := test.NewAssert(t)
 	circuit := &twoCommitCircuit{}
 	assignment := &twoCommitCircuit{A: 2, B: 3, Out: 6}
 	assert.CheckCircuit(circuit, test.WithCurves(ecc.BN254, ecc.BLS12_381), test.WithValidAssignment(assignment), test.WithBackends(backend.PLONK))
+	assert.CheckCircuit(circuit, test.WithCurves(ecc.BN254, ecc.BLS12_381), test.WithValidAssignment(assignment), test.WithBackends(backend.GROTH16))
+	// the Solidity verifier supports multiple commitments on BN254 only
+	assert.CheckCircuit(circuit, test.WithCurves(ecc.BN254), test.WithValidAssignment(assignment), test.WithBackends(backend.GROTH16), test.WithSolidityExportOptions(solidity.WithHashToFieldFunction(sha3.NewLegacyKeccak256())))
+}
+
+func TestThreeCommitments(t *testing.T) {
+	// chained commitments exercise the folding of the commitments' proofs of
+	// knowledge in the Solidity verifier, so they are verified on-chain
+	// (with the solccheck build tag) in addition to the Go verifier.
+	assert := test.NewAssert(t)
+	circuit := &threeCommitCircuit{}
+	assignment := &threeCommitCircuit{A: 1, B: 2, C: 3, Product: 6}
+	assert.CheckCircuit(circuit, test.WithCurves(ecc.BN254), test.WithValidAssignment(assignment), test.WithBackends(backend.GROTH16), test.WithSolidityExportOptions(solidity.WithHashToFieldFunction(sha3.NewLegacyKeccak256())))
 }
 
 // loadOrSetupGroth16VK loads an existing VK from vkPath, or if the file doesn't

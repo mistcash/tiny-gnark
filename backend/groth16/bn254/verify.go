@@ -204,10 +204,7 @@ func (vk *VerifyingKey) ExportSolidity(w io.Writer, exportOpts ...solidity.Expor
 			return hashFnName
 		},
 	}
-
-	if len(vk.PublicAndCommitmentCommitted) > 1 {
-		log.Warn().Msg("exporting solidity verifier with more than one commitment is not supported")
-	} else if len(vk.PublicAndCommitmentCommitted) == 1 {
+	if len(vk.PublicAndCommitmentCommitted) == 1 {
 		log.Warn().Msg("exporting solidity verifier only supports `sha256` as `HashToField`. The generated contract may not work for proofs generated with other hash functions.")
 	}
 
