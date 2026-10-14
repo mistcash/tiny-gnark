@@ -835,7 +835,12 @@ func (pr *Pairing) MillerLoopAndMul(P *G1Affine, Q *G2Affine, previous *GTEl) (*
 //
 // [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
 func (pr *Pairing) AssertMillerLoopAndFinalExpIsOne(P *G1Affine, Q *G2Affine, previous *GTEl) {
-	t2 := pr.millerLoopAndFinalExpResult([]*G1Affine{P}, []*G2Affine{Q}, previous)
+	t2, err := pr.millerLoopAndFinalExpResult([]*G1Affine{P}, []*G2Affine{Q}, previous)
+	if err != nil {
+		// P and Q are always a single point here, so the size check can not
+		// fail. Any other error is a bug in the pairing implementation.
+		panic(err)
+	}
 	pr.AssertIsEqual(t2, pr.Ext12.One())
 }
 
@@ -847,19 +852,26 @@ func (pr *Pairing) AssertMillerLoopAndFinalExpIsOne(P *G1Affine, Q *G2Affine, pr
 // [On Proving Pairings] paper by A. Novakovic and L. Eagen.
 //
 // [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
-func (pr *Pairing) AssertMultiMillerLoopAndFinalExpIsOne(P []*G1Affine, Q []*G2Affine, previous *GTEl) {
-	t2 := pr.millerLoopAndFinalExpResult(P, Q, previous)
+func (pr *Pairing) AssertMultiMillerLoopAndFinalExpIsOne(P []*G1Affine, Q []*G2Affine, previous *GTEl) error {
+	t2, err := pr.millerLoopAndFinalExpResult(P, Q, previous)
+	if err != nil {
+		return fmt.Errorf("miller loop and final exp result: %w", err)
+	}
 	pr.AssertIsEqual(t2, pr.Ext12.One())
+	return nil
 }
 
 // millerLoopAndFinalExpResult computes the Miller loop between P and Q,
-// multiplies it in 𝔽p¹² by previous and returns the result.
-func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, previous *GTEl) *GTEl {
+// multiplies it in 𝔽p¹² by previous and returns the result. It returns an
+// error when P and Q do not hold the same non-zero number of points.
+func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, previous *GTEl) (*GTEl, error) {
+	// check input size match
 	nP := len(P)
 	nQ := len(Q)
 	if nP == 0 || nP != nQ {
-		return nil
+		return nil, fmt.Errorf("mismatched number of P (%d) and Q (%d) points", nP, nQ)
 	}
+
 	tower := pr.ToTower(previous)
 
 	inputs := make([]*baseEl, 0, 2*nP+4*nQ+12)
@@ -919,7 +931,7 @@ func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, pre
 
 	res, err := pr.millerLoopLines(P, lines, residueWitnessInv, false)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	res = pr.Ext12.Conjugate(res)
 
@@ -937,7 +949,7 @@ func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, pre
 	t0 := pr.Frobenius(residueWitnessInv)
 	res = pr.Ext12.Mul(res, t0)
 
-	return res
+	return res, nil
 }
 
 // IsMillerLoopAndFinalExpOne computes the Miller loop between P and Q,
@@ -949,7 +961,12 @@ func (pr *Pairing) millerLoopAndFinalExpResult(P []*G1Affine, Q []*G2Affine, pre
 //
 // [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
 func (pr *Pairing) IsMillerLoopAndFinalExpOne(P *G1Affine, Q *G2Affine, previous *GTEl) frontend.Variable {
-	t2 := pr.millerLoopAndFinalExpResult([]*G1Affine{P}, []*G2Affine{Q}, previous)
+	t2, err := pr.millerLoopAndFinalExpResult([]*G1Affine{P}, []*G2Affine{Q}, previous)
+	if err != nil {
+		// P and Q are always a single point here, so the size check can not
+		// fail. Any other error is a bug in the pairing implementation.
+		panic(err)
+	}
 
 	res := pr.IsEqual(t2, pr.Ext12.One())
 	return res
