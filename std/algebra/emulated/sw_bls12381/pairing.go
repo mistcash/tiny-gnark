@@ -845,11 +845,24 @@ func (pr *Pairing) AssertMillerLoopAndFinalExpIsOne(P *G1Affine, Q *G2Affine, pr
 }
 
 // AssertMultiMillerLoopAndFinalExpIsOne computes the Miller loop between
-// multiple P and Q pairs and multiplies it in 𝔽p¹² by previous and
-// returns a boolean indicating if the result lies in the same equivalence
-// class as the reduced pairing purported to be 1. This check replaces the
-// final exponentiation step in-circuit and follows Section 4 of
-// [On Proving Pairings] paper by A. Novakovic and L. Eagen.
+// multiple P and Q pairs, multiplies it in 𝔽p¹² by previous and asserts that
+// the result lies in the same equivalence class as the reduced pairing
+// purported to be 1. This check replaces the final exponentiation step
+// in-circuit and follows Section 4 of [On Proving Pairings] paper by A.
+// Novakovic and L. Eagen.
+//
+// The assertion covers the accumulated product only: it proves
+// ∏ᵢ e(Pᵢ, Qᵢ) · previous == 1 as a whole, and says nothing about the
+// individual pairings e(Pᵢ, Qᵢ).
+//
+// When Qᵢ does not carry precomputed lines (Qᵢ.Lines == nil), the lines are
+// computed in-circuit. When Qᵢ carries precomputed lines, they are used
+// directly and are not constrained to correspond to Qᵢ.P — precomputed lines
+// are trusted input, see [NewG2AffineFixedPlaceholder] for the security
+// assumptions.
+//
+// It returns an error when P and Q do not hold the same non-zero number of
+// points.
 //
 // [On Proving Pairings]: https://eprint.iacr.org/2024/640.pdf
 func (pr *Pairing) AssertMultiMillerLoopAndFinalExpIsOne(P []*G1Affine, Q []*G2Affine, previous *GTEl) error {
