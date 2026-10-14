@@ -639,12 +639,11 @@ func (c *MultiMillerLoopAndFinalExpCircuit) Define(api frontend.API) error {
 	if err != nil {
 		return fmt.Errorf("new pairing: %w", err)
 	}
-	pairing.AssertMultiMillerLoopAndFinalExpIsOne(
+	return pairing.AssertMultiMillerLoopAndFinalExpIsOne(
 		[]*G1Affine{&c.P1, &c.P2, &c.P3},
 		[]*G2Affine{&c.Q1, &c.Q2, &c.Q3},
 		&c.Prev,
 	)
-	return nil
 }
 
 func TestMultiMillerLoopAndFinalExpIsOneTestSolve(t *testing.T) {
@@ -672,6 +671,101 @@ func TestMultiMillerLoopAndFinalExpIsOneTestSolve(t *testing.T) {
 		Q3:   NewG2Affine(q2),
 	}
 	assert.NoError(test.IsSolved(&MultiMillerLoopAndFinalExpCircuit{}, &witness, ecc.BN254.ScalarField()))
+}
+
+// TestMultiMillerLoopAndFinalExpIsOneRejectsBadWitness checks that the
+// assertion is not satisfiable with a tampered point or with a previous
+// Miller loop result of an unrelated pairing.
+func TestMultiMillerLoopAndFinalExpIsOneRejectsBadWitness(t *testing.T) {
+	assert := test.NewAssert(t)
+	p1, q1 := randomG1G2Affines()
+	p2, q2 := randomG1G2Affines()
+	var np1, np2 bn254.G1Affine
+	np1.Neg(&p1)
+	np2.Neg(&p2)
+
+	lines := bn254.PrecomputeLines(q1)
+	previous, err := bn254.MillerLoopFixedQ(
+		[]bn254.G1Affine{p1},
+		[][2][len(bn254.LoopCounter)]bn254.LineEvaluationAff{lines},
+	)
+	assert.NoError(err)
+
+	witness := MultiMillerLoopAndFinalExpCircuit{
+		Prev: NewGTEl(previous),
+		P1:   NewG1Affine(np1),
+		P2:   NewG1Affine(np2),
+		P3:   NewG1Affine(p2),
+		Q1:   NewG2Affine(q1),
+		Q2:   NewG2Affine(q2),
+		Q3:   NewG2Affine(q2),
+	}
+
+	// tampered last pair: the product of the pairings no longer cancels out
+	p3, q3 := randomG1G2Affines()
+	tampered := witness
+	tampered.P3 = NewG1Affine(p3)
+	tampered.Q3 = NewG2Affine(q3)
+
+	// previous Miller loop result of an unrelated pairing
+	lines = bn254.PrecomputeLines(q3)
+	unrelated, err := bn254.MillerLoopFixedQ(
+		[]bn254.G1Affine{p3},
+		[][2][len(bn254.LoopCounter)]bn254.LineEvaluationAff{lines},
+	)
+	assert.NoError(err)
+	wrongPrevious := witness
+	wrongPrevious.Prev = NewGTEl(unrelated)
+
+	err = test.IsSolved(&MultiMillerLoopAndFinalExpCircuit{}, &tampered, ecc.BN254.ScalarField())
+	assert.Error(err, "expected tampered witness to be rejected")
+
+	err = test.IsSolved(&MultiMillerLoopAndFinalExpCircuit{}, &wrongPrevious, ecc.BN254.ScalarField())
+	assert.Error(err, "expected unrelated previous Miller loop result to be rejected")
+}
+
+// MultiMillerLoopMismatchedSizesCircuit passes two P points and a single Q
+// point to the multi-pairing assertion.
+type MultiMillerLoopMismatchedSizesCircuit struct {
+	Prev   GTEl
+	P1, P2 G1Affine
+	Q1     G2Affine
+}
+
+func (c *MultiMillerLoopMismatchedSizesCircuit) Define(api frontend.API) error {
+	pairing, err := NewPairing(api)
+	if err != nil {
+		return fmt.Errorf("new pairing: %w", err)
+	}
+	return pairing.AssertMultiMillerLoopAndFinalExpIsOne(
+		[]*G1Affine{&c.P1, &c.P2},
+		[]*G2Affine{&c.Q1},
+		&c.Prev,
+	)
+}
+
+// MultiMillerLoopNoPointsCircuit passes no points at all to the multi-pairing
+// assertion.
+type MultiMillerLoopNoPointsCircuit struct {
+	Prev GTEl
+}
+
+func (c *MultiMillerLoopNoPointsCircuit) Define(api frontend.API) error {
+	pairing, err := NewPairing(api)
+	if err != nil {
+		return fmt.Errorf("new pairing: %w", err)
+	}
+	return pairing.AssertMultiMillerLoopAndFinalExpIsOne(nil, nil, &c.Prev)
+}
+
+func TestMultiMillerLoopAndFinalExpIsOneInvalidSizes(t *testing.T) {
+	assert := test.NewAssert(t)
+
+	_, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &MultiMillerLoopMismatchedSizesCircuit{})
+	assert.ErrorContains(err, "mismatched number of P (2) and Q (1) points")
+
+	_, err = frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &MultiMillerLoopNoPointsCircuit{})
+	assert.ErrorContains(err, "mismatched number of P (0) and Q (0) points")
 }
 
 type MuxesCircuits struct {
