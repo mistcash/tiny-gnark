@@ -634,12 +634,11 @@ func (c *MultiMillerLoopAndFinalExpCircuit) Define(api frontend.API) error {
 	if err != nil {
 		return fmt.Errorf("new pairing: %w", err)
 	}
-	pairing.AssertMultiMillerLoopAndFinalExpIsOne(
+	return pairing.AssertMultiMillerLoopAndFinalExpIsOne(
 		[]*G1Affine{&c.P1, &c.P2, &c.P3},
 		[]*G2Affine{&c.Q1, &c.Q2, &c.Q3},
 		&c.Prev,
 	)
-	return nil
 }
 
 func TestMultiMillerLoopAndFinalExpIsOneTestSolve(t *testing.T) {
@@ -668,6 +667,13 @@ func TestMultiMillerLoopAndFinalExpIsOneTestSolve(t *testing.T) {
 		Q3:   NewG2Affine(q2),
 	}
 	assert.NoError(test.IsSolved(&MultiMillerLoopAndFinalExpCircuit{}, &witness, ecc.BN254.ScalarField()))
+
+	// a tampered Q point must leave the circuit unsatisfiable
+	_, q3 := randomG1G2Affines()
+	tampered := witness
+	tampered.Q3 = NewG2Affine(q3)
+	err = test.IsSolved(&MultiMillerLoopAndFinalExpCircuit{}, &tampered, ecc.BN254.ScalarField())
+	assert.Error(err, "expected tampered witness to be rejected")
 }
 
 func TestIsOnG1(t *testing.T) {
