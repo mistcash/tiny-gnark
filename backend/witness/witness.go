@@ -54,6 +54,7 @@ import (
 	fr_grumpkin "github.com/consensys/gnark-crypto/ecc/grumpkin/fr"
 	"github.com/consensys/gnark-crypto/field/babybear"
 	"github.com/consensys/gnark-crypto/field/koalabear"
+	"github.com/consensys/gnark-crypto/field/mamabear"
 	"github.com/consensys/gnark/debug"
 	"github.com/consensys/gnark/frontend/schema"
 	"github.com/consensys/gnark/internal/smallfields/tinyfield"
@@ -189,6 +190,8 @@ func (w *witness) WriteTo(wr io.Writer) (n int64, err error) {
 		m, err = t.WriteTo(wr)
 	case koalabear.Vector:
 		m, err = t.WriteTo(wr)
+	case mamabear.Vector:
+		m, err = t.WriteTo(wr)
 	default:
 		panic("invalid input")
 	}
@@ -233,6 +236,9 @@ func (w *witness) ReadFrom(r io.Reader) (n int64, err error) {
 		m, err = t.ReadFrom(r)
 		w.vector = t
 	case koalabear.Vector:
+		m, err = t.ReadFrom(r)
+		w.vector = t
+	case mamabear.Vector:
 		m, err = t.ReadFrom(r)
 		w.vector = t
 	default:
@@ -362,9 +368,10 @@ func (w *witness) FromJSON(s *schema.Schema, data []byte) error {
 	// value failed. All this is not really performant for large witnesses, but again, JSON
 	// shouldn't be used in perf-critical scenario.
 	var chValues chan any
+	nbSecret := s.NbSecret
 	if publicOnly {
 		chValues = make(chan any, len(publicValues))
-		s.NbSecret = 0
+		nbSecret = 0
 	} else {
 		chValues = make(chan any, len(publicValues)+len(secretValues))
 	}
@@ -384,5 +391,5 @@ func (w *witness) FromJSON(s *schema.Schema, data []byte) error {
 		}
 	}()
 
-	return w.Fill(s.NbPublic, s.NbSecret, chValues)
+	return w.Fill(s.NbPublic, nbSecret, chValues)
 }
